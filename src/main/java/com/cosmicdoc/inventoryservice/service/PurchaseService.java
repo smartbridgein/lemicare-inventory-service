@@ -1,0 +1,241 @@
+package com.cosmicdoc.inventoryservice.service;
+
+import com.cosmicdoc.common.model.*;
+import com.cosmicdoc.common.repository.*;
+import com.cosmicdoc.inventoryservice.dto.request.CreatePurchaseRequest;
+import com.cosmicdoc.inventoryservice.dto.response.PurchaseDetailResponse;
+import com.cosmicdoc.inventoryservice.exception.InvalidRequestException;
+import com.cosmicdoc.inventoryservice.exception.ResourceNotFoundException;
+import com.google.cloud.Timestamp;
+import com.google.cloud.firestore.*;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+@Service
+@RequiredArgsConstructor
+public class PurchaseService {
+
+    private final Firestore firestore;
+    private final PurchaseRepository purchaseRepository;
+    private final MedicineRepository medicineRepository;
+    private final TaxProfileRepository taxProfileRepository;
+    private final SupplierRepository supplierRepository;
+    private final MedicineBatchRepository medicineBatchRepository;
+    private final SupplierPaymentRepository supplierPaymentRepository;
+    // You might also inject SupplierRepository to validate supplierId
+
+    public Purchase createPurchase(String orgId, String branchId, String userId, CreatePurchaseRequest request)
+            throws ExecutionException, InterruptedException {
+
+        return firestore.runTransaction(transaction -> {
+            // ===================================================================
+            // PHASE 1: ALL READS & VALIDATION
+            // ===================================================================
+
+            // 1. Validate Supplier
+            if (!supplierRepository.existsById(transaction, orgId, request.getSupplierId())) {
+                throw new ResourceNotFoundException("Supplier with ID " + request.getSupplierId() + " not found.");
+            }
+
+            // 2. Batch-read all Medicine and Tax Profile master data upfront
+            List<String> requiredMedicineIds = request.getItems().stream().map(CreatePurchaseRequest.PurchaseItemDto::getMedicineId).distinct().collect(Collectors.toList());
+            List<DocumentSnapshot> medicineSnapshots = medicineRepository.getAll(transaction, orgId, branchId, requiredMedicineIds);
+
+            Map<String, Medicine> medicineMasterDataMap = medicineSnapshots.stream().map(doc -> {
+                if (!doc.exists()) throw new ResourceNotFoundException("Medicine with ID " + doc.getId() + " not found.");
+                return doc.toObject(Medicine.class);
+            }).collect(Collectors.toMap(Medicine::getMedicineId, Function.identity()));
+
+            //List<String> requiredTaxProfileIds = medicineMasterDataMap.values().stream().map(Medicine::getTaxProfileId).distinct().collect(Collectors.toList());
+            List<String> requiredTaxProfileIds = request.getItems().stream()
+                    .map(CreatePurchaseRequest.PurchaseItemDto::getTaxProfileId)
+                    .distinct()
+                    .collect(Collectors.toList());
+            List<DocumentSnapshot> taxProfileSnapshots = taxProfileRepository.getAll(transaction, orgId, requiredTaxProfileIds);
+            Map<String, TaxProfile> taxProfileMap = taxProfileSnapshots.stream().map(doc -> {
+                if (!doc.exists()) throw new ResourceNotFoundException("TaxProfile with ID " + doc.getId() + " not found.");
+                return doc.toObject(TaxProfile.class);
+            }).collect(Collectors.toMap(TaxProfile::getTaxProfileId, Function.identity()));
+
+            // ===================================================================
+            // PHASE 2: DATA PREPARATION & ADVANCED FINANCIAL CALCULATION
+            // ===================================================================
+
+            final BigDecimal[] invoiceTotalTaxable = {BigDecimal.ZERO};
+            final BigDecimal[] invoiceTotalTax = {BigDecimal.ZERO};
+            final BigDecimal[] invoiceTotalDiscount = {BigDecimal.ZERO};
+
+            List<PurchaseItem> purchaseItems = request.getItems().stream().map(itemDto -> {
+                Medicine masterMedicine = medicineMasterDataMap.get(itemDto.getMedicineId());
+               // TaxProfile taxProfile = taxProfileMap.get(masterMedicine.getTaxProfileId());
+                TaxProfile taxProfile = taxProfileMap.get(itemDto.getTaxProfileId());
+                if (taxProfile == null) throw new InvalidRequestException("Tax profile for " + masterMedicine.getName() + " is missing.");
+
+                // --- Convert DTO inputs to BigDecimal for precise calculations ---
+                BigDecimal packQuantity = new BigDecimal(itemDto.getPackQuantity());
+                BigDecimal costPerPack = BigDecimal.valueOf(itemDto.getPurchaseCostPerPack());
+                BigDecimal discountPercent = BigDecimal.valueOf(itemDto.getDiscountPercentage()).divide(new BigDecimal(100));
+                BigDecimal taxRate = BigDecimal.valueOf(taxProfile.getTotalRate()).divide(new BigDecimal(100));
+
+                // --- Perform Line Item Financial Flow ---
+                BigDecimal grossAmount = costPerPack.multiply(packQuantity);
+                BigDecimal discountAmount = grossAmount.multiply(discountPercent);
+                BigDecimal netAmountAfterDiscount = grossAmount.subtract(discountAmount);
+
+                BigDecimal taxableAmount;
+                BigDecimal taxAmount;
+
+                // --- Handle Inclusive / Exclusive GST based on the invoice-level setting ---
+                if (request.getGstType() == GstType.INCLUSIVE) {
+                    taxableAmount = netAmountAfterDiscount.divide(BigDecimal.ONE.add(taxRate), 2, RoundingMode.HALF_UP);
+                    taxAmount = netAmountAfterDiscount.subtract(taxableAmount);
+                } else { // EXCLUSIVE
+                    taxableAmount = netAmountAfterDiscount;
+                    taxAmount = taxableAmount.multiply(taxRate);
+                }
+
+                BigDecimal lineItemTotal = taxableAmount.add(taxAmount);
+
+                // --- Aggregate totals for the main invoice document ---
+                invoiceTotalTaxable[0] = invoiceTotalTaxable[0].add(taxableAmount);
+                invoiceTotalTax[0] = invoiceTotalTax[0].add(taxAmount);
+                invoiceTotalDiscount[0] = invoiceTotalDiscount[0].add(discountAmount);
+
+                int totalUnitsReceived = (itemDto.getPackQuantity() + itemDto.getFreePackQuantity()) * itemDto.getItemsPerPack();
+
+                // --- Build the rich PurchaseItem model for storage ---
+                return PurchaseItem.builder()
+                        .medicineId(itemDto.getMedicineId()).batchNo(itemDto.getBatchNo())
+                        .expiryDate(Timestamp.of(itemDto.getExpiryDate()))
+                        .packQuantity(itemDto.getPackQuantity()).freePackQuantity(itemDto.getFreePackQuantity())
+                        .itemsPerPack(itemDto.getItemsPerPack()).totalReceivedQuantity(totalUnitsReceived)
+                        .purchaseCostPerPack(itemDto.getPurchaseCostPerPack()).discountPercentage(itemDto.getDiscountPercentage())
+                        .lineItemDiscountAmount(round(discountAmount)).lineItemTaxableAmount(round(taxableAmount))
+                        .lineItemTaxAmount(round(taxAmount)).lineItemTotalAmount(round(lineItemTotal))
+                        .mrpPerItem(itemDto.getMrpPerItem()).taxProfileId(taxProfile.getTaxProfileId())
+                        .taxRateApplied(taxProfile.getTotalRate()).taxComponents(taxProfile.getComponents()).build();
+            }).collect(Collectors.toList());
+
+            BigDecimal grandTotal = invoiceTotalTaxable[0].add(invoiceTotalTax[0]);
+
+            // ===================================================================
+            // PHASE 3: ALL WRITES
+            // ===================================================================
+            // A. Determine payment status and due amount
+            double amountPaid = request.getAmountPaid();
+            double dueAmount = round(grandTotal) - amountPaid;
+
+            PaymentStatus paymentStatus;
+            if (dueAmount <= 0.01) { // Use a small tolerance for floating point comparisons
+                paymentStatus = PaymentStatus.PAID;
+            } else if (amountPaid > 0) {
+                paymentStatus = PaymentStatus.PARTIALLY_PAID;
+            } else {
+                paymentStatus = PaymentStatus.PENDING;
+            }
+            // B. Build the final Purchase domain object
+            String purchaseId = "purchase_" + UUID.randomUUID().toString();
+            Purchase newPurchase = Purchase.builder()
+                    .purchaseId(purchaseId).organizationId(orgId).branchId(branchId)
+                    .supplierId(request.getSupplierId()).invoiceDate(Timestamp.of(request.getInvoiceDate()))
+                    .referenceId(request.getReferenceId()).gstType(request.getGstType())
+                    .totalTaxableAmount(round(invoiceTotalTaxable[0]))
+                    .totalDiscountAmount(round(invoiceTotalDiscount[0]))
+                    .totalTaxAmount(round(invoiceTotalTax[0]))
+                    .totalAmount(round(grandTotal))
+                    .amountPaid(amountPaid) // <-- ADDED
+                    .dueAmount(dueAmount)   // <-- ADDED
+                    .paymentStatus(paymentStatus)
+                    .items(purchaseItems) // The list of rich, calculated PurchaseItem objects
+                    .createdBy(userId).createdAt(Timestamp.now()).build();
+
+            // C. Prepare the initial Payment document (if any payment was made)
+            SupplierPayment initialPayment = null;
+            if (amountPaid > 0) {
+                initialPayment = SupplierPayment.builder()
+                        .paymentId("pay_" + UUID.randomUUID().toString())
+                        .purchaseInvoiceId(purchaseId)
+                        .paymentDate(Timestamp.of(request.getInvoiceDate()))
+                        .amountPaid(amountPaid)
+                        .paymentMode(request.getPaymentMode())
+                        .referenceNumber(request.getPaymentReference())
+                        .createdBy(userId).build();
+            }
+
+            // B. Queue the write for the new Purchase document
+            purchaseRepository.saveInTransaction(transaction, newPurchase);
+
+            if (initialPayment != null) {
+                supplierPaymentRepository.saveInTransaction(transaction, orgId, request.getSupplierId(), initialPayment);
+            }
+                // 3. STAGE WRITE: Update the Supplier's outstanding balance.
+                //    The balance increases by the amount that is *not* paid yet (the due amount).
+                supplierRepository.updateBalanceInTransaction(transaction, orgId, request.getSupplierId(), dueAmount);
+
+            // 4. Queue the creation of a new MedicineBatch document for each item
+
+            for (PurchaseItem item : purchaseItems) {
+                if (item.getTotalReceivedQuantity() > 0) {
+                    MedicineBatch newBatch = MedicineBatch.builder()
+                            .batchId(UUID.randomUUID().toString()).batchNo(item.getBatchNo())
+                            .expiryDate(item.getExpiryDate()).quantityAvailable(item.getTotalReceivedQuantity())
+                            .purchaseCost(item.getPurchaseCostPerPack() / item.getItemsPerPack()) // Store cost per single item
+                            .mrp(item.getMrpPerItem()).build();
+                    medicineBatchRepository.saveInTransaction(transaction, orgId, branchId, item.getMedicineId(), newBatch);
+                }
+            }
+
+            DocumentReference supplierRef = firestore.collection("organizations").document(orgId)
+                    .collection("suppliers").document(request.getSupplierId());
+
+            // Use FieldValue.increment() to increase the balance.
+            // This is safe from race conditions.
+            transaction.update(supplierRef, "balance", FieldValue.increment(grandTotal.doubleValue()));
+
+            return newPurchase;
+        }).get();
+    }
+
+    private double round(BigDecimal value) {
+        if (value == null) return 0.0;
+        return value.setScale(2, RoundingMode.HALF_UP).doubleValue();
+    }
+
+
+    public List<Purchase> getPurchasesForBranch(String orgId, String branchId) {
+        return purchaseRepository.findAllByBranchId(orgId, branchId);
+    }
+
+    public PurchaseDetailResponse getPurchaseById(String orgId, String branchId, String purchaseId) {
+        Purchase purchase = purchaseRepository.findById(orgId, branchId, purchaseId)
+                .orElseThrow(() -> new ResourceNotFoundException("Purchase with ID " + purchaseId + " not found."));
+        // In a real app, you would fetch medicine names here to enrich the response
+        List<String> medicineIds = purchase.getItems().stream()
+                .map(PurchaseItem::getMedicineId)
+                .distinct()
+                .collect(Collectors.toList());
+        // 3. Fetch all the corresponding Medicine master documents in a single batch read.
+        //    (This assumes your MedicineRepository has a 'findAllByIds' method).
+        List<Medicine> medicines = medicineRepository.findAllByIds(orgId, branchId, medicineIds);
+        // 4. Create the lookup map: medicineId -> medicineName.
+        Map<String, String> medicineIdToNameMap = medicines.stream()
+                .collect(Collectors.toMap(Medicine::getMedicineId, Medicine::getName));
+        // 5. Call the DTO factory method, now passing the enrichment map.
+        return PurchaseDetailResponse.from(purchase, medicineIdToNameMap);
+
+    }
+
+    // NOTE: 'Update' for a purchase is typically not allowed for accounting integrity.
+    // Instead, you create a Purchase Return.
+    // 'Delete' is also not recommended for the same reason. You might implement a 'cancel' status.
+}

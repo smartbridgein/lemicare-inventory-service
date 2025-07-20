@@ -1,0 +1,73 @@
+# ===================================================================
+# SERVER CONFIGURATION
+# ===================================================================
+server:
+  # The port for the inventory-service. (e.g., 8083)
+  # Ensure this is different from the gateway (8080) and auth-service (8081).
+  port: 8082
+
+# ===================================================================
+# CORE SPRING APPLICATION CONFIGURATION
+# ===================================================================
+spring:
+  application:
+    name: inventory-service
+
+  # ===================================================================
+  # SECURITY CONFIGURATION (OAUTH2 RESOURCE SERVER)
+  # ===================================================================
+  # This section provides the recipe for Spring to automatically create the JwtDecoder bean.
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # This property is used to validate the 'iss' (issuer) claim inside the JWT.
+          # It MUST be the same value as 'app.jwt.issuer' in your auth-service.
+          issuer: "https://smartbridgein.com" # Corrected issuer to match standard
+
+          # This property provides the shared secret to validate the JWT's signature.
+          # It MUST be the exact same 'app.jwt.secret-key' from your auth-service.
+          secret-key: "YourSuperStrongAndLongSecretKeyForHmacShaAlgorithmsAtLeast256Bits"
+
+# ===================================================================
+# CUSTOM APPLICATION PROPERTIES
+# ===================================================================
+app:
+  firebase:
+    service-account-path: "google-services.json"
+
+# ===================================================================
+# ACTUATOR / MANAGEMENT ENDPOINTS
+# =================================_CONFIGURATIONS
+# ===================================================================
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "health,info"
+  endpoint:
+    health:
+      show-details: when_authorized
+
+# ===================================================================
+# OPENAPI / SWAGGER DOCUMENTATION CONFIGURATION
+# ===================================================================
+springdoc:
+  # The path where the Swagger UI will be available
+  swagger-ui:
+    path: /swagger-ui.html
+  # The path where the raw OpenAPI JSON specification will be available
+  api-docs:
+    path: /api-docs
+  # Define metadata for your API documentation
+  info:
+    title: CosmicDoc - Inventory Service API
+    version: "1.0.0"
+    description: "API endpoints for managing master data, purchases, sales, and returns for the inventory module."
+    contact:
+      name: "CosmicDoc Support"
+      email: "support@cosmicdoc.com"
+  # Configuration to add a "Bearer Token" authorization button to the Swagger UI
+  # This allows developers to test secure endpoints directly from the documentation.
+  default-consumes-media-type: application/json
+  default-produces-media-type: application/json

@@ -1,0 +1,52 @@
+steps:
+# Build and install everything in one step using the parent POM
+- name: 'maven:3.9-eclipse-temurin-17'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      # List what's in the current directory
+      echo "Listing build context..."
+      ls -la
+      
+      # Show what's in the common library directory
+      echo "Listing common library directory..."
+      ls -la cosmicdoc-common
+      
+      # Install the common library first
+      echo "Building and installing cosmicdoc-common library..."
+      cd cosmicdoc-common
+      mvn clean install -DskipTests
+      echo "✅ cosmicdoc-common installed successfully"
+      
+      # Move back to inventory service directory and build it
+      echo "Building inventory service..."
+      cd ..
+      mvn clean package -DskipTests
+      echo "✅ Inventory service built successfully"
+  
+# Build the container image
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', 'gcr.io/$PROJECT_ID/inventory-service-master:latest', '.']
+  
+# Push the container image to Container Registry
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', 'gcr.io/$PROJECT_ID/inventory-service-master:latest']
+  
+# Deploy container image to Cloud Run
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args:
+    - 'run'
+    - 'deploy'
+    - 'inventory-service-master'
+    - '--image=gcr.io/$PROJECT_ID/inventory-service-master:latest'
+    - '--platform=managed'
+    - '--region=us-central1'
+    - '--allow-unauthenticated'
+    - '--set-env-vars=SPRING_PROFILES_ACTIVE=cloud'
+    - '--set-env-vars=ALLOWED_ORIGINS=https://healthcare-app-1078740886343.us-central1.run.app'
+    - '--port=8082'
+
+images:
+- 'gcr.io/$PROJECT_ID/inventory-service-master:latest'
