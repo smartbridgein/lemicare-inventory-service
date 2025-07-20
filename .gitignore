@@ -12,9 +12,6 @@ target/
 .settings
 .springBeans
 .sts4-cache
-/Users/venkat/Desktop/lemicare-apps/lemicare-inventory-service/src/main/resources/google-services copy.json
-/Users/venkat/Desktop/lemicare-apps/lemicare-inventory-service/src/main/resources/google-services.json
-/Users/venkat/Desktop/lemicare-apps/lemicare-inventory-service/src/main/resources/lemicare-app-firebase-adminsdk-fbsvc-7504a1fef1.json
 ### IntelliJ IDEA ###
 .idea
 *.iws
@@ -33,3 +30,8 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Firebase Configuration Files ###
+src/main/resources/google-services copy.json
+src/main/resources/google-services.json
+src/main/resources/lemicare-app-firebase-adminsdk-fbsvc-7504a1fef1.json
