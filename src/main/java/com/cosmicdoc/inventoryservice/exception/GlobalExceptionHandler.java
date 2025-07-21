@@ -56,4 +56,15 @@ public class GlobalExceptionHandler {
         return new ResponseEntity<>(ex.getMessage(), HttpStatus.CONFLICT);
     }
 
+    /**
+     * Handles IllegalStateException, which we use for business rule violations.
+     * For example, trying to delete a supplier with an outstanding balance.
+     */
+    @ExceptionHandler(IllegalStateException.class) // <-- MUST be this exact class
+    @ResponseStatus(HttpStatus.CONFLICT)
+    public ResponseEntity<String> handleIllegalStateException(IllegalStateException ex) { // <-- Parameter must match
+        // The response body will now be the clear message from your exception.
+        return new ResponseEntity<>(ex.getMessage(), HttpStatus.CONFLICT);
+    }
+
 }

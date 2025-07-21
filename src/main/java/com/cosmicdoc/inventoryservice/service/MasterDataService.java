@@ -232,7 +232,7 @@ public class MasterDataService {
         // 4. Save the updated object, overwriting the old one.
         return medicineRepository.save(orgId, branchId, existingMedicine);
     }
-    public void deleteMedicine(String orgId, String branchId, String medicineId) {
+    public void deleteMedicineSoft(String orgId, String branchId, String medicineId) {
         // SOFT DELETE implementation
         Medicine medicine = medicineRepository.findById(orgId, branchId, medicineId)
                 .orElseThrow(() -> new ResourceNotFoundException("Medicine with ID " + medicineId + " not found."));
@@ -246,7 +246,7 @@ public class MasterDataService {
         medicineRepository.save(orgId, branchId, medicine);
     }
 
-    public void deleteSupplier(String orgId, String supplierId) {
+    public void deleteSupplierSoft(String orgId, String supplierId) {
         // SOFT DELETE implementation
         Supplier supplier = supplierRepository.findById(orgId, supplierId)
                 .orElseThrow(() -> new ResourceNotFoundException("Supplier with ID " + supplierId + " not found."));
@@ -254,6 +254,38 @@ public class MasterDataService {
         supplier.setStatus("INACTIVE");
         supplierRepository.save(orgId, supplier);
     }
+
+    /**
+     * Performs a "hard delete" on a Supplier, permanently removing them from the database.
+     * It first checks if the supplier exists before attempting deletion.
+     *
+     * @param orgId The organization ID from the security context.
+     * @param supplierId The ID of the supplier to delete.
+     * @throws ResourceNotFoundException if the supplier does not exist.
+     */
+    public void deleteSupplier(String orgId, String supplierId) {
+        // 1. Fetch the supplier using the existing findById method.
+        //    This serves two purposes:
+        //    a) It confirms the supplier exists. If not, it throws ResourceNotFoundException.
+        //    b) It gives us the full Supplier object, which we can use for business logic checks.
+        Supplier supplierToDelete = supplierRepository.findById(orgId, supplierId)
+                .orElseThrow(() -> new ResourceNotFoundException("Supplier with ID " + supplierId + " not found."));
+
+        // 2. --- CRITICAL BUSINESS LOGIC CHECK ---
+        //    Now that we have the supplier object, we can check its balance.
+        //    You should prevent deletion if the supplier has an outstanding balance.
+        Double balance = supplierToDelete.getOutstandingBalance();
+        if (balance != null && balance != 0.0) {
+            throw new IllegalStateException("Cannot delete supplier '" + supplierToDelete.getName() + "' as they have an outstanding balance of " + balance);
+        }
+
+        // You could also add another repository call here to check if the supplier has
+        // been used in any purchase invoices, which is another common reason to prevent deletion.
+
+        // 3. If all checks pass, call the repository to permanently delete the document.
+        supplierRepository.deleteById(orgId, supplierId);
+    }
+
     public Supplier updateSupplier(String orgId, String supplierId, UpdateSupplierRequest dto) {
         Supplier existingSupplier = supplierRepository.findById(orgId, supplierId)
                 .orElseThrow(() -> new ResourceNotFoundException("Supplier with ID " + supplierId + " not found."));
@@ -361,7 +393,7 @@ public class MasterDataService {
      * @throws IllegalStateException if the tax profile is still in use.
      * @throws ResourceNotFoundException if the tax profile does not exist.
      */
-    public void deleteTaxProfile(String orgId, String taxProfileId) {
+    public void deleteTaxProfileSoft(String orgId, String taxProfileId) {
         // 1. Fetch the existing profile to ensure it exists.
         TaxProfile taxProfile = taxProfileRepository.findById(orgId, taxProfileId)
                 .orElseThrow(() -> new ResourceNotFoundException("Tax Profile with ID " + taxProfileId + " not found."));
@@ -380,4 +412,65 @@ public class MasterDataService {
         taxProfileRepository.save(orgId, taxProfile);
     }
 
+    /**
+     * Performs a "hard delete" on a Tax Profile, permanently removing it.
+     * <p>
+     * It includes a critical safety check to prevent deletion if the profile
+     * is currently assigned to any active medicines.
+     *
+     * @param orgId The organization ID from the security context.
+     * @param taxProfileId The ID of the tax profile to delete.
+     * @throws IllegalStateException if the tax profile is still in use.
+     * @throws ResourceNotFoundException if the tax profile does not exist.
+     */
+    public void deleteTaxProfile(String orgId, String taxProfileId) {
+        // 1. First, check if the tax profile even exists.
+        //    This provides a clear error if the client tries to delete an invalid ID.
+        TaxProfile taxProfile = taxProfileRepository.findById(orgId, taxProfileId)
+                .orElseThrow(() -> new ResourceNotFoundException("Tax Profile with ID " + taxProfileId + " not found."));
+
+        // 2. --- CRITICAL BUSINESS LOGIC CHECK ---
+        //    Check if any active medicine is currently using this tax profile.
+        //    This prevents breaking data integrity for your products.
+        boolean isInUse = medicineRepository.existsByTaxProfileId(orgId, taxProfileId);
+        if (isInUse) {
+            throw new IllegalStateException("Cannot delete tax profile '" + taxProfile.getProfileName() + "' as it is currently assigned to one or more medicines.");
+        }
+
+        // 3. If all checks pass, call the repository to permanently delete the document.
+        taxProfileRepository.deleteById(orgId, taxProfileId);
+    }
+
+    /**
+     * Performs a "hard delete" on a Medicine, permanently removing it and all its batches.
+     * <p>
+     * Includes a critical safety check to prevent the deletion of a medicine
+     * that has any remaining stock.
+     *
+     * @param orgId The organization ID from the security context.
+     * @param branchId The branch ID from the security context.
+     * @param medicineId The ID of the medicine to delete.
+     * @throws IllegalStateException if the medicine still has stock.
+     * @throws ResourceNotFoundException if the medicine does not exist.
+     */
+    public void deleteMedicine(String orgId, String branchId, String medicineId) {
+        // 1. Check if the medicine exists before proceeding.
+        medicineRepository.findById(orgId, branchId, medicineId)
+                .orElseThrow(() -> new ResourceNotFoundException("Medicine with ID " + medicineId + " not found."));
+
+
+        // 2. --- CRITICAL BUSINESS LOGIC CHECK ---
+        //    Fetch all batches to check the total stock.
+        List<MedicineBatch> batches = medicineBatchRepository.findAllBatchesForMedicine(orgId, branchId, medicineId);
+        int totalStock = batches.stream().mapToInt(MedicineBatch::getQuantityAvailable).sum();
+
+        if (totalStock > 0) {
+            throw new IllegalStateException("Cannot delete medicine. It still has " + totalStock + " units in stock.");
+        }
+
+        // TODO: Long-term, also check for sales/purchase history before allowing deletion.
+
+        // 3. If all checks pass, call the repository to permanently delete the document and its sub-collection.
+        medicineRepository.deleteByIdHard(orgId, branchId, medicineId);
+    }
 }

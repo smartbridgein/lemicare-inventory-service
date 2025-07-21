@@ -3,6 +3,7 @@ package com.cosmicdoc.inventoryservice.service;
 import com.cosmicdoc.common.model.*;
 import com.cosmicdoc.common.repository.*;
 import com.cosmicdoc.inventoryservice.dto.request.CreatePurchaseRequest;
+import com.cosmicdoc.inventoryservice.dto.request.UpdatePurchaseRequest;
 import com.cosmicdoc.inventoryservice.dto.response.PurchaseDetailResponse;
 import com.cosmicdoc.inventoryservice.exception.InvalidRequestException;
 import com.cosmicdoc.inventoryservice.exception.ResourceNotFoundException;
@@ -13,6 +14,7 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -235,7 +237,219 @@ public class PurchaseService {
 
     }
 
-    // NOTE: 'Update' for a purchase is typically not allowed for accounting integrity.
-    // Instead, you create a Purchase Return.
-    // 'Delete' is also not recommended for the same reason. You might implement a 'cancel' status.
+    /**
+     * Updates an existing purchase invoice. This is a complex transactional operation
+     * that reverses the old stock and financial impacts before applying the new ones.
+     *
+     * A critical precondition check ensures that a purchase cannot be edited if any
+     * stock from its original batches has already been sold or returned.
+     *
+     * @param purchaseId The ID of the purchase to update.
+     * @param request The DTO containing the full set of updated data for the invoice.
+     * @return The updated Purchase object.
+     */
+    public Purchase updatePurchase(String orgId, String branchId, String userId, String purchaseId, UpdatePurchaseRequest request)
+            throws ExecutionException, InterruptedException {
+
+        return firestore.runTransaction(transaction -> {
+            // ===================================================================
+            // PHASE 1: READ ALL ORIGINAL & NEW DATA
+            // ===================================================================
+
+            // 1. READ the original Purchase document.
+            Purchase originalPurchase = purchaseRepository.findById(transaction, orgId, branchId, purchaseId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Purchase with ID " + purchaseId + " not found to update."));
+
+            // 2. READ all MedicineBatches created by the original purchase.
+            Map<String, MedicineBatch> oldBatchesMap = new HashMap<>();
+            for (PurchaseItem oldItem : originalPurchase.getItems()) {
+                medicineBatchRepository.findByBatchNo(transaction, orgId, branchId, oldItem.getMedicineId(), oldItem.getBatchNo())
+                        .ifPresent(batch -> oldBatchesMap.put(oldItem.getMedicineId() + "_" + oldItem.getBatchNo(), batch));
+            }
+
+            // 3. READ master data (Medicines, TaxProfiles) for the NEW request items.
+            List<String> requiredMedicineIds = request.getItems().stream().map(UpdatePurchaseRequest.PurchaseItemDto::getMedicineId).distinct().collect(Collectors.toList());
+            List<DocumentSnapshot> medicineSnapshots = medicineRepository.getAll(transaction, orgId, branchId, requiredMedicineIds);
+            Map<String, Medicine> medicineMasterDataMap = medicineSnapshots.stream().map(doc -> {
+                if (!doc.exists()) throw new ResourceNotFoundException("Medicine with ID " + doc.getId() + " not found.");
+                return doc.toObject(Medicine.class);
+            }).collect(Collectors.toMap(Medicine::getMedicineId, Function.identity()));
+
+            List<String> requiredTaxProfileIds = request.getItems().stream().map(UpdatePurchaseRequest.PurchaseItemDto::getTaxProfileId).distinct().collect(Collectors.toList());
+            List<DocumentSnapshot> taxProfileSnapshots = taxProfileRepository.getAll(transaction, orgId, requiredTaxProfileIds);
+            Map<String, TaxProfile> taxProfileMap = taxProfileSnapshots.stream().map(doc -> {
+                if (!doc.exists()) throw new ResourceNotFoundException("TaxProfile with ID " + doc.getId() + " not found.");
+                return doc.toObject(TaxProfile.class);
+            }).collect(Collectors.toMap(TaxProfile::getTaxProfileId, Function.identity()));
+
+            // ===================================================================
+            // PHASE 2: VALIDATE, REVERSE, & RE-CALCULATE
+            // ===================================================================
+
+            // --- A. REVERSE the old inventory (Staging Writes) & VALIDATE stock usage ---
+            for (PurchaseItem oldItem : originalPurchase.getItems()) {
+                MedicineBatch oldBatch = oldBatchesMap.get(oldItem.getMedicineId() + "_" + oldItem.getBatchNo());
+                if (oldBatch != null) {
+                    if (oldBatch.getQuantityAvailable() < oldItem.getTotalReceivedQuantity()) {
+                        throw new IllegalStateException("Cannot edit purchase. Stock from batch " + oldItem.getBatchNo() + " has already been used.");
+                    }
+                    medicineBatchRepository.updateStockInTransaction(transaction, orgId, branchId, oldItem.getMedicineId(), oldBatch.getBatchId(), -oldItem.getTotalReceivedQuantity());
+                }
+            }
+
+            // --- B. RE-CALCULATE everything for the new purchase state (In-Memory) ---
+            final BigDecimal[] newTotalTaxable = {BigDecimal.ZERO};
+            final BigDecimal[] newTotalTax = {BigDecimal.ZERO};
+            final BigDecimal[] newTotalDiscount = {BigDecimal.ZERO};
+
+            List<PurchaseItem> newPurchaseItems = request.getItems().stream().map(itemDto -> {
+                Medicine masterMedicine = medicineMasterDataMap.get(itemDto.getMedicineId());
+                TaxProfile taxProfile = taxProfileMap.get(itemDto.getTaxProfileId());
+                if (taxProfile == null) throw new InvalidRequestException("Tax profile for " + masterMedicine.getName() + " is missing.");
+
+                BigDecimal packQuantity = new BigDecimal(itemDto.getPackQuantity());
+                BigDecimal costPerPack = BigDecimal.valueOf(itemDto.getPurchaseCostPerPack());
+                BigDecimal discountPercent = BigDecimal.valueOf(itemDto.getDiscountPercentage()).divide(new BigDecimal(100));
+                BigDecimal taxRate = BigDecimal.valueOf(taxProfile.getTotalRate()).divide(new BigDecimal(100));
+
+                BigDecimal grossAmount = costPerPack.multiply(packQuantity);
+                BigDecimal discountAmount = grossAmount.multiply(discountPercent);
+                BigDecimal netAmountAfterDiscount = grossAmount.subtract(discountAmount);
+
+                BigDecimal taxableAmount;
+                BigDecimal taxAmount;
+                if (request.getGstType() == GstType.INCLUSIVE) {
+                    taxableAmount = netAmountAfterDiscount.divide(BigDecimal.ONE.add(taxRate), 2, RoundingMode.HALF_UP);
+                    taxAmount = netAmountAfterDiscount.subtract(taxableAmount);
+                } else { // EXCLUSIVE
+                    taxableAmount = netAmountAfterDiscount;
+                    taxAmount = taxableAmount.multiply(taxRate);
+                }
+
+                newTotalTaxable[0] = newTotalTaxable[0].add(taxableAmount);
+                newTotalTax[0] = newTotalTax[0].add(taxAmount);
+                newTotalDiscount[0] = newTotalDiscount[0].add(discountAmount);
+
+                int totalUnitsReceived = (itemDto.getPackQuantity() + itemDto.getFreePackQuantity()) * itemDto.getItemsPerPack();
+                return PurchaseItem.builder()
+                        .medicineId(itemDto.getMedicineId()).batchNo(itemDto.getBatchNo())
+                        .expiryDate(Timestamp.of(itemDto.getExpiryDate()))
+                        .packQuantity(itemDto.getPackQuantity()).freePackQuantity(itemDto.getFreePackQuantity())
+                        .itemsPerPack(itemDto.getItemsPerPack()).totalReceivedQuantity(totalUnitsReceived)
+                        .purchaseCostPerPack(itemDto.getPurchaseCostPerPack()).discountPercentage(itemDto.getDiscountPercentage())
+                        .lineItemDiscountAmount(round(discountAmount)).lineItemTaxableAmount(round(taxableAmount))
+                        .lineItemTaxAmount(round(taxAmount)).lineItemTotalAmount(round(taxableAmount.add(taxAmount)))
+                        .mrpPerItem(itemDto.getMrpPerItem()).taxProfileId(itemDto.getTaxProfileId())
+                        .taxRateApplied(taxProfile.getTotalRate()).taxComponents(taxProfile.getComponents()).build();
+            }).collect(Collectors.toList());
+
+            BigDecimal newGrandTotal = newTotalTaxable[0].add(newTotalTax[0]);
+            double newAmountPaid = request.getAmountPaid();
+            double newDueAmount = round(newGrandTotal) - newAmountPaid;
+
+            // ===================================================================
+            // PHASE 3: UPDATE MODEL & STAGE FINAL WRITES
+            // ===================================================================
+
+            // 1. UPDATE all fields on the originalPurchase object.
+            originalPurchase.setSupplierId(request.getSupplierId());
+            originalPurchase.setInvoiceDate(Timestamp.of(request.getInvoiceDate()));
+            originalPurchase.setReferenceId(request.getReferenceId());
+            originalPurchase.setGstType(request.getGstType());
+            originalPurchase.setItems(newPurchaseItems);
+            originalPurchase.setTotalTaxableAmount(round(newTotalTaxable[0]));
+            originalPurchase.setTotalDiscountAmount(round(newTotalDiscount[0]));
+            originalPurchase.setTotalTaxAmount(round(newTotalTax[0]));
+            originalPurchase.setTotalAmount(round(newGrandTotal));
+            originalPurchase.setAmountPaid(newAmountPaid);
+            originalPurchase.setDueAmount(newDueAmount);
+            originalPurchase.setPaymentStatus(newDueAmount <= 0.01 ? PaymentStatus.PAID : (newAmountPaid > 0 ? PaymentStatus.PARTIALLY_PAID : PaymentStatus.PENDING));
+            // You can add 'updatedBy' and 'updatedAt' audit fields here
+
+            // 2. STAGE WRITE: Save the updated Purchase document.
+            purchaseRepository.saveInTransaction(transaction, originalPurchase);
+
+            // 3. STAGE WRITE: Create new MedicineBatch documents for the updated purchase.
+            for (PurchaseItem newItem : newPurchaseItems) {
+                if (newItem.getTotalReceivedQuantity() > 0) {
+                    MedicineBatch updatedBatch = MedicineBatch.builder()
+                            .batchId(UUID.randomUUID().toString()).batchNo(newItem.getBatchNo())
+                            .expiryDate(newItem.getExpiryDate()).quantityAvailable(newItem.getTotalReceivedQuantity())
+                            .purchaseCost(newItem.getPurchaseCostPerPack() / newItem.getItemsPerPack())
+                            .mrp(newItem.getMrpPerItem()).build();
+                    medicineBatchRepository.saveInTransaction(transaction, orgId, branchId, newItem.getMedicineId(), updatedBatch);
+                }
+            }
+
+            // 4. STAGE WRITE: Atomically update the supplier's balance.
+            double oldDueAmount = originalPurchase.getDueAmount();
+            double balanceChange = newDueAmount - oldDueAmount;
+            supplierRepository.updateBalanceInTransaction(transaction, orgId, request.getSupplierId(), balanceChange);
+
+            // Note: A full implementation would also reverse/re-apply payments.
+            // For simplicity, we are assuming the payment is re-entered with the update.
+
+            return originalPurchase;
+        }).get();
+    }
+
+
+    /**
+     * Performs a "hard delete" on a Purchase, permanently removing the invoice,
+     * its associated payment records, and the stock it introduced.
+     *
+     * Includes a critical safety check to prevent deletion if any stock from the
+     * purchase has already been sold or returned.
+     */
+    public void deletePurchase(String orgId, String branchId, String purchaseId)
+            throws ExecutionException, InterruptedException {
+
+        firestore.runTransaction(transaction -> {
+            // ===================================================================
+            // PHASE 1: READS & VALIDATION
+            // ===================================================================
+
+            // 1. READ the original Purchase document.
+            Purchase purchaseToDelete = purchaseRepository.findById(transaction, orgId, branchId, purchaseId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Purchase with ID " + purchaseId + " not found."));
+
+            // 2. READ all MedicineBatches created by this purchase to validate them.
+            for (PurchaseItem item : purchaseToDelete.getItems()) {
+                MedicineBatch batch = medicineBatchRepository
+                        .findByBatchNo(transaction, orgId, branchId, item.getMedicineId(), item.getBatchNo())
+                        .orElse(null); // It's okay if the batch was already deleted manually
+
+                if (batch != null) {
+                    // CRITICAL SAFETY CHECK
+                    if (batch.getQuantityAvailable() < item.getTotalReceivedQuantity()) {
+                        throw new IllegalStateException("Cannot delete purchase. Stock from batch " + item.getBatchNo() + " has already been used.");
+                    }
+                }
+            }
+
+            // ===================================================================
+            // PHASE 2: STAGE ALL DELETE & UPDATE OPERATIONS
+            // ===================================================================
+
+            // 1. STAGE DELETE: Delete all MedicineBatches created by this purchase.
+            for (PurchaseItem item : purchaseToDelete.getItems()) {
+                medicineBatchRepository
+                        .findByBatchNo(transaction, orgId, branchId, item.getMedicineId(), item.getBatchNo())
+                        .ifPresent(batch -> {
+                            medicineBatchRepository.deleteByIdInTransaction(transaction, orgId, branchId, item.getMedicineId(), batch.getBatchId());
+                        });
+            }
+
+            // 2. STAGE DELETE: Delete all payment records associated with this purchase.
+            supplierPaymentRepository.deleteAllByPurchaseIdInTransaction(transaction, orgId, purchaseToDelete.getSupplierId(), purchaseId);
+
+            // 3. STAGE UPDATE: Reverse the financial impact on the supplier's balance.
+            supplierRepository.updateBalanceInTransaction(transaction, orgId, purchaseToDelete.getSupplierId(), -purchaseToDelete.getDueAmount());
+
+            // 4. STAGE DELETE: Delete the main Purchase document itself.
+            purchaseRepository.deleteByIdInTransaction(transaction, orgId, branchId, purchaseId);
+
+            return null; // Return null as this is a void operation
+        }).get();
+    }
 }
