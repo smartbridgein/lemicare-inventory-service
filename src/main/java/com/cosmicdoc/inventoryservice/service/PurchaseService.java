@@ -23,6 +23,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import static com.cosmicdoc.common.model.AdjustmentType.*;
+
 @Service
 @RequiredArgsConstructor
 public class PurchaseService {
@@ -36,7 +38,7 @@ public class PurchaseService {
     private final SupplierPaymentRepository supplierPaymentRepository;
     // You might also inject SupplierRepository to validate supplierId
 
-    public Purchase createPurchase(String orgId, String branchId, String userId, CreatePurchaseRequest request)
+    /*public Purchase createPurchase(String orgId, String branchId, String userId, CreatePurchaseRequest request)
             throws ExecutionException, InterruptedException {
 
         return firestore.runTransaction(transaction -> {
@@ -128,14 +130,40 @@ public class PurchaseService {
                         .taxRateApplied(taxProfile.getTotalRate()).taxComponents(taxProfile.getComponents()).build();
             }).collect(Collectors.toList());
 
-            BigDecimal grandTotal = invoiceTotalTaxable[0].add(invoiceTotalTax[0]);
+           // BigDecimal grandTotal = invoiceTotalTaxable[0].add(invoiceTotalTax[0]);
+
+            BigDecimal subTotalAfterLineItems = invoiceTotalTaxable[0].add(invoiceTotalTax[0]);
+            BigDecimal calculatedOverallAdjustmentAmount = BigDecimal.ZERO;
+            if (request.getOverallAdjustmentType() != null && request.getOverallAdjustmentValue() != null) {
+                BigDecimal adjustmentValue = BigDecimal.valueOf(request.getOverallAdjustmentValue());
+
+                switch (request.getOverallAdjustmentType()) {
+                    case PERCENTAGE_DISCOUNT:
+                        // Calculate percentage discount on the taxable amount
+                        calculatedOverallAdjustmentAmount = invoiceTotalTaxable[0].multiply(adjustmentValue.divide(new BigDecimal(100)));
+                        break;
+                    case FIXED_DISCOUNT:
+                        // The value is a direct monetary discount
+                        calculatedOverallAdjustmentAmount = adjustmentValue;
+                        break;
+                    case ADDITIONAL_CHARGE:
+                        // The value is a direct monetary charge, so we represent it as a negative "discount"
+                        calculatedOverallAdjustmentAmount = adjustmentValue.negate();
+                        break;
+                }
+            }
+
+            // Grand Total is now the sub-total MINUS the overall adjustment/discount.
+            // A negative discount (an additional charge) will correctly be added.
+            BigDecimal finalGrandTotal = subTotalAfterLineItems.subtract(calculatedOverallAdjustmentAmount);
+            //BigDecimal grandTotal = subTotalAfterLineDiscounts.subtract(calculatedOverallAdjustmentAmount);
 
             // ===================================================================
             // PHASE 3: ALL WRITES
             // ===================================================================
             // A. Determine payment status and due amount
             double amountPaid = request.getAmountPaid();
-            double dueAmount = round(grandTotal) - amountPaid;
+            double dueAmount = round(finalGrandTotal) - amountPaid;
 
             PaymentStatus paymentStatus;
             if (dueAmount <= 0.01) { // Use a small tolerance for floating point comparisons
@@ -154,7 +182,10 @@ public class PurchaseService {
                     .totalTaxableAmount(round(invoiceTotalTaxable[0]))
                     .totalDiscountAmount(round(invoiceTotalDiscount[0]))
                     .totalTaxAmount(round(invoiceTotalTax[0]))
-                    .totalAmount(round(grandTotal))
+                    .overallAdjustmentType(request.getOverallAdjustmentType())
+                    .overallAdjustmentValue(request.getOverallAdjustmentValue() != null ? request.getOverallAdjustmentValue() : 0.0)
+                    .calculatedOverallAdjustmentAmount(round(calculatedOverallAdjustmentAmount))
+                    .totalAmount(round(finalGrandTotal))
                     .amountPaid(amountPaid) // <-- ADDED
                     .dueAmount(dueAmount)   // <-- ADDED
                     .paymentStatus(paymentStatus)
@@ -203,6 +234,161 @@ public class PurchaseService {
             // Use FieldValue.increment() to increase the balance.
             // This is safe from race conditions.
             transaction.update(supplierRef, "balance", FieldValue.increment(grandTotal.doubleValue()));
+
+            return newPurchase;
+        }).get();
+    }*/
+
+    public Purchase createPurchase(String orgId, String branchId, String userId, CreatePurchaseRequest request)
+            throws ExecutionException, InterruptedException {
+
+        return firestore.runTransaction(transaction -> {
+            // ===================================================================
+            // PHASE 1: ALL DATABASE READS & PRE-VALIDATION
+            // ===================================================================
+
+            // 1. Validate Supplier
+            if (!supplierRepository.existsById(transaction, orgId, request.getSupplierId())) {
+                throw new ResourceNotFoundException("Supplier with ID " + request.getSupplierId() + " not found.");
+            }
+
+            // 2. Batch-read all required Medicine and Tax Profile documents
+            List<String> requiredMedicineIds = request.getItems().stream().map(CreatePurchaseRequest.PurchaseItemDto::getMedicineId).distinct().collect(Collectors.toList());
+            List<DocumentSnapshot> medicineSnapshots = medicineRepository.getAll(transaction, orgId, branchId, requiredMedicineIds);
+            Map<String, Medicine> medicineMasterDataMap = medicineSnapshots.stream().map(doc -> {
+                if (!doc.exists()) throw new ResourceNotFoundException("Medicine with ID " + doc.getId() + " not found.");
+                return doc.toObject(Medicine.class);
+            }).collect(Collectors.toMap(Medicine::getMedicineId, Function.identity()));
+
+            List<String> requiredTaxProfileIds = request.getItems().stream().map(CreatePurchaseRequest.PurchaseItemDto::getTaxProfileId).distinct().collect(Collectors.toList());
+            List<DocumentSnapshot> taxProfileSnapshots = taxProfileRepository.getAll(transaction, orgId, requiredTaxProfileIds);
+            Map<String, TaxProfile> taxProfileMap = taxProfileSnapshots.stream().map(doc -> {
+                if (!doc.exists()) throw new ResourceNotFoundException("TaxProfile with ID " + doc.getId() + " not found.");
+                return doc.toObject(TaxProfile.class);
+            }).collect(Collectors.toMap(TaxProfile::getTaxProfileId, Function.identity()));
+
+            // --- All database reads are now complete. ---
+
+
+            // ===================================================================
+            // PHASE 2: LINE ITEM & SUB-TOTAL CALCULATION
+            // ===================================================================
+
+            final BigDecimal[] invoiceTotalTaxable = {BigDecimal.ZERO};
+            final BigDecimal[] invoiceTotalTax = {BigDecimal.ZERO};
+            final BigDecimal[] invoiceTotalDiscount = {BigDecimal.ZERO};
+
+            List<PurchaseItem> purchaseItems = request.getItems().stream().map(itemDto -> {
+                Medicine masterMedicine = medicineMasterDataMap.get(itemDto.getMedicineId());
+                TaxProfile taxProfile = taxProfileMap.get(itemDto.getTaxProfileId());
+                if (taxProfile == null) throw new InvalidRequestException("Tax profile for " + masterMedicine.getName() + " is missing.");
+
+                BigDecimal packQuantity = new BigDecimal(itemDto.getPackQuantity());
+                BigDecimal costPerPack = BigDecimal.valueOf(itemDto.getPurchaseCostPerPack());
+                BigDecimal discountPercent = BigDecimal.valueOf(itemDto.getDiscountPercentage()).divide(new BigDecimal(100));
+                BigDecimal taxRate = BigDecimal.valueOf(taxProfile.getTotalRate()).divide(new BigDecimal(100));
+
+                BigDecimal grossAmount = costPerPack.multiply(packQuantity);
+                BigDecimal discountAmount = grossAmount.multiply(discountPercent);
+                BigDecimal netAmountAfterDiscount = grossAmount.subtract(discountAmount);
+
+                BigDecimal taxableAmount;
+                BigDecimal taxAmount;
+                if (request.getGstType() == GstType.INCLUSIVE) {
+                    taxableAmount = netAmountAfterDiscount.divide(BigDecimal.ONE.add(taxRate), 2, RoundingMode.HALF_UP);
+                    taxAmount = netAmountAfterDiscount.subtract(taxableAmount);
+                } else { // EXCLUSIVE
+                    taxableAmount = netAmountAfterDiscount;
+                    taxAmount = taxableAmount.multiply(taxRate);
+                }
+
+                invoiceTotalTaxable[0] = invoiceTotalTaxable[0].add(taxableAmount);
+                invoiceTotalTax[0] = invoiceTotalTax[0].add(taxAmount);
+                invoiceTotalDiscount[0] = invoiceTotalDiscount[0].add(discountAmount);
+
+                int totalUnitsReceived = (itemDto.getPackQuantity() + itemDto.getFreePackQuantity()) * itemDto.getItemsPerPack();
+                return PurchaseItem.builder()
+                        .medicineId(itemDto.getMedicineId()).batchNo(itemDto.getBatchNo())
+                        .expiryDate(Timestamp.of(itemDto.getExpiryDate()))
+                        .packQuantity(itemDto.getPackQuantity()).freePackQuantity(itemDto.getFreePackQuantity())
+                        .itemsPerPack(itemDto.getItemsPerPack()).totalReceivedQuantity(totalUnitsReceived)
+                        .purchaseCostPerPack(itemDto.getPurchaseCostPerPack()).discountPercentage(itemDto.getDiscountPercentage())
+                        .lineItemDiscountAmount(round(discountAmount)).lineItemTaxableAmount(round(taxableAmount))
+                        .lineItemTaxAmount(round(taxAmount)).lineItemTotalAmount(round(taxableAmount.add(taxAmount)))
+                        .mrpPerItem(itemDto.getMrpPerItem()).taxProfileId(itemDto.getTaxProfileId())
+                        .taxRateApplied(taxProfile.getTotalRate()).taxComponents(taxProfile.getComponents()).build();
+            }).collect(Collectors.toList());
+
+            // ===================================================================
+            // PHASE 3: OVERALL ADJUSTMENT & FINAL CALCULATION
+            // ===================================================================
+
+            BigDecimal subTotal = invoiceTotalTaxable[0].add(invoiceTotalTax[0]);
+            BigDecimal calculatedOverallAdjustmentAmount = BigDecimal.ZERO;
+
+            if (request.getOverallAdjustmentType() != null && request.getOverallAdjustmentValue() != null) {
+                BigDecimal adjustmentValue = BigDecimal.valueOf(request.getOverallAdjustmentValue());
+                switch (request.getOverallAdjustmentType()) {
+                    case PERCENTAGE_DISCOUNT:
+                        calculatedOverallAdjustmentAmount = invoiceTotalTaxable[0].multiply(adjustmentValue.divide(new BigDecimal(100)));
+                        break;
+                    case FIXED_DISCOUNT:
+                        calculatedOverallAdjustmentAmount = adjustmentValue;
+                        break;
+                    case ADDITIONAL_CHARGE:
+                        calculatedOverallAdjustmentAmount = adjustmentValue.negate();
+                        break;
+                }
+            }
+
+            BigDecimal grandTotal = subTotal.subtract(calculatedOverallAdjustmentAmount);
+
+            double amountPaid = request.getAmountPaid();
+            double dueAmount = round(grandTotal) - amountPaid;
+            PaymentStatus paymentStatus = (dueAmount <= 0.01) ? PaymentStatus.PAID : (amountPaid > 0 ? PaymentStatus.PARTIALLY_PAID : PaymentStatus.PENDING);
+
+            // ===================================================================
+            // PHASE 4: PREPARE AND STAGE ALL WRITES
+            // ===================================================================
+
+            String purchaseId = "purchase_" + UUID.randomUUID().toString();
+            Purchase newPurchase = Purchase.builder()
+                    .purchaseId(purchaseId).organizationId(orgId).branchId(branchId)
+                    .supplierId(request.getSupplierId()).invoiceDate(Timestamp.of(request.getInvoiceDate()))
+                    .referenceId(request.getReferenceId()).gstType(request.getGstType())
+                    .totalTaxableAmount(round(invoiceTotalTaxable[0]))
+                    .totalDiscountAmount(round(invoiceTotalDiscount[0]))
+                    .totalTaxAmount(round(invoiceTotalTax[0]))
+                    .overallAdjustmentType(request.getOverallAdjustmentType())
+                    .overallAdjustmentValue(request.getOverallAdjustmentValue() != null ? request.getOverallAdjustmentValue() : 0.0)
+                    .calculatedOverallAdjustmentAmount(round(calculatedOverallAdjustmentAmount))
+                    .totalAmount(round(grandTotal))
+                    .amountPaid(amountPaid).dueAmount(dueAmount).paymentStatus(paymentStatus)
+                    .items(purchaseItems).createdBy(userId).createdAt(Timestamp.now()).build();
+
+            purchaseRepository.saveInTransaction(transaction, newPurchase);
+
+            if (amountPaid > 0) {
+                SupplierPayment initialPayment = SupplierPayment.builder()
+                        .paymentId("pay_" + UUID.randomUUID().toString()).purchaseInvoiceId(purchaseId)
+                        .paymentDate(Timestamp.of(request.getInvoiceDate())).amountPaid(amountPaid)
+                        .paymentMode(request.getPaymentMode()).referenceNumber(request.getPaymentReference())
+                        .createdBy(userId).build();
+                supplierPaymentRepository.saveInTransaction(transaction, orgId, request.getSupplierId(), initialPayment);
+            }
+
+            supplierRepository.updateBalanceInTransaction(transaction, orgId, request.getSupplierId(), dueAmount);
+
+            for (PurchaseItem item : purchaseItems) {
+                if (item.getTotalReceivedQuantity() > 0) {
+                    MedicineBatch newBatch = MedicineBatch.builder()
+                            .batchId(UUID.randomUUID().toString()).batchNo(item.getBatchNo())
+                            .expiryDate(item.getExpiryDate()).quantityAvailable(item.getTotalReceivedQuantity())
+                            .purchaseCost(item.getPurchaseCostPerPack() / item.getItemsPerPack())
+                            .mrp(item.getMrpPerItem()).build();
+                    medicineBatchRepository.saveInTransaction(transaction, orgId, branchId, item.getMedicineId(), newBatch);
+                }
+            }
 
             return newPurchase;
         }).get();

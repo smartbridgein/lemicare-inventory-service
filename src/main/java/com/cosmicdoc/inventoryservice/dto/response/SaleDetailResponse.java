@@ -5,6 +5,7 @@ import lombok.Builder;
 import lombok.Data;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @Data
@@ -33,22 +34,42 @@ public class SaleDetailResponse {
         private double salePrice;
         private double discountAmount;
         private double taxAmount;
+        private List<BatchDetail> batches;
     }
 
-    public static SaleDetailResponse from(Sale sale) {
+    @Data
+    @Builder
+    public static class BatchDetail {
+        private String batchNo;
+        private Date expiryDate;
+        private int quantity;
+    }
+
+    public static SaleDetailResponse from(Sale sale, Map<String, String> medicineIdToNameMap) {
         return SaleDetailResponse.builder()
-                .saleId(sale.getSaleId())
-                // ... map all other fields from the Sale model ...
+                // ... map other fields ...
                 .items(sale.getItems().stream()
-                        .map(item -> SaleItemDetail.builder()
-                                .medicineId(item.getMedicineId())
-                                // .medicineName(...) would be enriched by the service
-                                .batchNo(item.getBatchNo())
-                                .quantity(item.getQuantity())
-                                .salePrice(item.getSalePrice())
-                                .discountAmount(item.getDiscountAmount())
-                                .taxAmount(item.getTaxAmount())
-                                .build())
+                        .map(item -> {
+                            // --- NEW MAPPING LOGIC ---
+                            // For each SaleItem, create a list of its batch details.
+                            List<BatchDetail> batchDetails = item.getBatchAllocations().stream()
+                                    .map(alloc -> BatchDetail.builder()
+                                            .batchNo(alloc.getBatchNo())
+                                            .expiryDate(alloc.getExpiryDate().toDate())
+                                            .quantity(alloc.getQuantityTaken())
+                                            .build())
+                                    .collect(Collectors.toList());
+
+                            return SaleItemDetail.builder()
+                                    .medicineId(item.getMedicineId())
+                                    .medicineName(medicineIdToNameMap.get(item.getMedicineId()))
+                                    .quantity(item.getQuantity())
+                                    .batches(batchDetails) // <-- Use the new list
+                                    .salePrice(item.getLineItemTotalAmount())
+                                    .discountAmount(item.getLineItemDiscountAmount())
+                                    .taxAmount(item.getTaxAmount())
+                                    .build();
+                        })
                         .collect(Collectors.toList()))
                 .build();
     }

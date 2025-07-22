@@ -1,5 +1,6 @@
 package com.cosmicdoc.inventoryservice.dto.request;
 
+import com.google.cloud.Timestamp;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -15,6 +16,8 @@ import lombok.Data;
         private Integer quantity;
         @NotNull @Min(0)
         private Double discountPercentage;
+        private String batchNumber;
+        private Timestamp expiryDate;
 
      // The client sends the Unit MRP it used for calculation
         @NotNull @PositiveOrZero
