@@ -383,7 +383,7 @@ public class PurchaseService {
             for (PurchaseItem item : purchaseItems) {
                 if (item.getTotalReceivedQuantity() > 0) {
                     MedicineBatch newBatch = MedicineBatch.builder()
-                            .batchId(UUID.randomUUID().toString()).batchNo(item.getBatchNo())
+                            .batchId(IdGenerator.newId("")).batchNo(item.getBatchNo())
                             .expiryDate(item.getExpiryDate()).quantityAvailable(item.getTotalReceivedQuantity())
                             .purchaseCost(item.getPurchaseCostPerPack() / item.getItemsPerPack())
                             .mrp(item.getMrpPerItem()).build();
@@ -560,7 +560,7 @@ public class PurchaseService {
             for (PurchaseItem newItem : newPurchaseItems) {
                 if (newItem.getTotalReceivedQuantity() > 0) {
                     MedicineBatch updatedBatch = MedicineBatch.builder()
-                            .batchId(UUID.randomUUID().toString()).batchNo(newItem.getBatchNo())
+                            .batchId(IdGenerator.newId("")).batchNo(newItem.getBatchNo())
                             .expiryDate(newItem.getExpiryDate()).quantityAvailable(newItem.getTotalReceivedQuantity())
                             .purchaseCost(newItem.getPurchaseCostPerPack() / newItem.getItemsPerPack())
                             .mrp(newItem.getMrpPerItem()).build();
