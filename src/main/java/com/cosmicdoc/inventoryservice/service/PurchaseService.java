@@ -2,6 +2,7 @@ package com.cosmicdoc.inventoryservice.service;
 
 import com.cosmicdoc.common.model.*;
 import com.cosmicdoc.common.repository.*;
+import com.cosmicdoc.common.util.IdGenerator;
 import com.cosmicdoc.inventoryservice.dto.request.CreatePurchaseRequest;
 import com.cosmicdoc.inventoryservice.dto.request.UpdatePurchaseRequest;
 import com.cosmicdoc.inventoryservice.dto.response.PurchaseDetailResponse;
@@ -351,7 +352,7 @@ public class PurchaseService {
             // PHASE 4: PREPARE AND STAGE ALL WRITES
             // ===================================================================
 
-            String purchaseId = "purchase_" + UUID.randomUUID().toString();
+            String purchaseId = IdGenerator.newId("PUR");
             Purchase newPurchase = Purchase.builder()
                     .purchaseId(purchaseId).organizationId(orgId).branchId(branchId)
                     .supplierId(request.getSupplierId()).invoiceDate(Timestamp.of(request.getInvoiceDate()))
@@ -370,7 +371,7 @@ public class PurchaseService {
 
             if (amountPaid > 0) {
                 SupplierPayment initialPayment = SupplierPayment.builder()
-                        .paymentId("pay_" + UUID.randomUUID().toString()).purchaseInvoiceId(purchaseId)
+                        .paymentId(IdGenerator.newId("PAY")).purchaseInvoiceId(purchaseId)
                         .paymentDate(Timestamp.of(request.getInvoiceDate())).amountPaid(amountPaid)
                         .paymentMode(request.getPaymentMode()).referenceNumber(request.getPaymentReference())
                         .createdBy(userId).build();

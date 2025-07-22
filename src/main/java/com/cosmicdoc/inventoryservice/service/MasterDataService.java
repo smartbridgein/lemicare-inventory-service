@@ -5,6 +5,7 @@ import com.cosmicdoc.common.repository.MedicineBatchRepository;
 import com.cosmicdoc.common.repository.MedicineRepository;
 import com.cosmicdoc.common.repository.SupplierRepository;
 import com.cosmicdoc.common.repository.TaxProfileRepository;
+import com.cosmicdoc.common.util.IdGenerator;
 import com.cosmicdoc.inventoryservice.dto.request.*;
 import com.cosmicdoc.inventoryservice.dto.response.MedicineStockResponse;
 import com.cosmicdoc.inventoryservice.exception.ResourceNotFoundException;
@@ -49,7 +50,7 @@ public class MasterDataService {
             }
             
             // 1. Generate a unique, server-side ID for the new medicine.
-            String medicineId = "med_" + UUID.randomUUID().toString();
+            String medicineId =  IdGenerator.newId("MED");;
 
             // 2. Build the Medicine domain object from the DTO, including the new fields.
             Medicine newMedicine = Medicine.builder()
@@ -120,8 +121,7 @@ public class MasterDataService {
         if (supplierExists) {
             throw new IllegalArgumentException("A supplier with the name '" + supplierName + "' already exists.");
         }
-        
-        String supplierId = "sup_" + UUID.randomUUID().toString();
+        String supplierId = IdGenerator.newId("SUP");
         Supplier supplier = Supplier.builder()
                 .supplierId(supplierId)
                 .name(dto.getName())

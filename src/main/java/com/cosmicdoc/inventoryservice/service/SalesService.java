@@ -2,6 +2,7 @@ package com.cosmicdoc.inventoryservice.service;
 
 import com.cosmicdoc.common.model.*;
 import com.cosmicdoc.common.repository.*;
+import com.cosmicdoc.common.util.IdGenerator;
 import com.cosmicdoc.inventoryservice.dto.request.*;
 import com.cosmicdoc.inventoryservice.exception.InsufficientStockException;
 import com.cosmicdoc.inventoryservice.exception.InvalidRequestException;
@@ -362,7 +363,7 @@ public class SalesService {
                 );
             }*/
 
-            String saleId = "sale_" + UUID.randomUUID().toString();
+            String saleId = IdGenerator.newId("SALE");
             partialSale.setSaleId(saleId);
             partialSale.setTotalMrpAmount(round(serverCalculatedTotalMrp));
             partialSale.setTotalDiscountAmount(round(serverCalculatedTotalDiscount));

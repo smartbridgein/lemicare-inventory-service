@@ -2,6 +2,7 @@ package com.cosmicdoc.inventoryservice.service;
 
 import com.cosmicdoc.common.model.*;
 import com.cosmicdoc.common.repository.*;
+import com.cosmicdoc.common.util.IdGenerator;
 import com.cosmicdoc.inventoryservice.dto.request.CreatePurchaseReturnRequest;
 import com.cosmicdoc.inventoryservice.dto.request.CreateSalesReturnRequest;
 import com.cosmicdoc.inventoryservice.dto.response.PurchaseReturnListResponse;
@@ -41,6 +42,119 @@ public class ReturnsService {
      * for the returned stock.
      */
     public SalesReturn processSalesReturn(String orgId, String branchId, String createdByUserId, CreateSalesReturnRequest request)
+            throws ExecutionException, InterruptedException {
+
+        return firestore.runTransaction(transaction -> {
+            // ===================================================================
+            // PHASE 1: READS & VALIDATION
+            // ===================================================================
+
+            // 1. READ the original Sale document. This is the source of truth.
+            Sale originalSale = saleRepository.findById(transaction, orgId, branchId, request.getOriginalSaleId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Original sale with ID " + request.getOriginalSaleId() + " not found."));
+
+            // ===================================================================
+            // PHASE 2: CALCULATIONS & PREPARING WRITES
+            // ===================================================================
+
+            BigDecimal invoiceTotalMrp = BigDecimal.ZERO;
+            BigDecimal invoiceTotalDiscount = BigDecimal.ZERO;
+            BigDecimal invoiceTotalTaxable = BigDecimal.ZERO;
+            BigDecimal invoiceTotalTax = BigDecimal.ZERO;
+            List<SalesReturnItem> returnItems = new ArrayList<>();
+
+            for (var itemDto : request.getItems()) {
+                if (itemDto.getReturnQuantity() <= 0) continue;
+
+                // --- THIS IS THE CORRECTED LOGIC TO FIND THE ORIGINAL ITEM ---
+                // A. Find the matching line item from the original sale by medicineId.
+                //    We assume one medicine appears only once per sale invoice.
+                SaleItem originalItem = originalSale.getItems().stream()
+                        .filter(orig -> orig.getMedicineId().equals(itemDto.getMedicineId()))
+                        .findFirst()
+                        .orElseThrow(() -> new InvalidRequestException("Medicine with ID " + itemDto.getMedicineId() + " not found in original sale."));
+
+                // B. Validate the return quantity against the originally purchased quantity.
+                if (originalItem.getQuantity() < itemDto.getReturnQuantity()) {
+                    throw new InvalidRequestException("Cannot return more than the " + originalItem.getQuantity() + " units purchased for medicine " + itemDto.getMedicineId());
+                }
+
+                // --- End of corrected logic ---
+
+                // C. Calculate the credit value for this line item based on the original sale's prices.
+                BigDecimal returnQuantity = new BigDecimal(itemDto.getReturnQuantity());
+                BigDecimal mrpPerItem = BigDecimal.valueOf(originalItem.getMrpPerItem());
+                BigDecimal discountPercent = BigDecimal.valueOf(originalItem.getDiscountPercentage()).divide(new BigDecimal(100));
+                BigDecimal taxRate = BigDecimal.valueOf(originalItem.getTaxRateApplied()).divide(new BigDecimal(100));
+
+                BigDecimal lineItemGrossMrp = mrpPerItem.multiply(returnQuantity);
+                BigDecimal lineItemDiscountAmount = lineItemGrossMrp.multiply(discountPercent);
+                BigDecimal lineItemNetAfterDiscount = lineItemGrossMrp.subtract(lineItemDiscountAmount);
+
+// --- THIS IS THE CORRECTED LOGIC ---
+// We assume sales prices (MRP) are always tax-inclusive.
+                BigDecimal lineItemTaxableAmount = lineItemNetAfterDiscount.divide(BigDecimal.ONE.add(taxRate), 2, RoundingMode.HALF_UP);
+                BigDecimal lineItemTaxAmount = lineItemNetAfterDiscount.subtract(lineItemTaxableAmount); // <-- FIXED
+// ------------------------------------
+
+// D. Aggregate totals for the return invoice.
+                invoiceTotalMrp = invoiceTotalMrp.add(lineItemGrossMrp);
+                invoiceTotalDiscount = invoiceTotalDiscount.add(lineItemDiscountAmount);
+                invoiceTotalTaxable = invoiceTotalTaxable.add(lineItemTaxableAmount);
+                invoiceTotalTax = invoiceTotalTax.add(lineItemTaxAmount);
+
+                // E. STAGE WRITE: Add stock back to inventory by creating a new batch.
+                MedicineBatch returnedBatch = MedicineBatch.builder()
+                        .batchId(IdGenerator.newId("batch")) // Use new ID generator
+                        .batchNo("SRET-" + itemDto.getBatchNo())
+                        .expiryDate(Timestamp.now())
+                        .quantityAvailable(itemDto.getReturnQuantity())
+                        .purchaseCost(0.0).mrp(0.0).build();
+                medicineBatchRepository.saveInTransaction(transaction, orgId, branchId, itemDto.getMedicineId(), returnedBatch);
+
+                // F. Build the rich SalesReturnItem model for storage.
+                returnItems.add(SalesReturnItem.builder()
+                        .medicineId(itemDto.getMedicineId())
+                        .batchNo(itemDto.getBatchNo()) // The batch being returned
+                        .returnQuantity(itemDto.getReturnQuantity())
+                        .mrpAtTimeOfSale(originalItem.getMrpPerItem())
+                        .discountPercentageAtSale(originalItem.getDiscountPercentage())
+                        .lineItemReturnValue(round(lineItemNetAfterDiscount))
+                        .lineItemTaxAmount(round(lineItemTaxAmount)).build());
+            }
+
+            // ===================================================================
+            // PHASE 3: FINALIZE AND STAGE FINAL WRITE
+            // ===================================================================
+            BigDecimal overallDiscountPercent = BigDecimal.valueOf(request.getOverallDiscountPercentage()).divide(new BigDecimal(100));
+            BigDecimal netTotalBeforeOverallDiscount = invoiceTotalMrp.subtract(invoiceTotalDiscount);
+            BigDecimal overallDiscountAmount = netTotalBeforeOverallDiscount.multiply(overallDiscountPercent);
+            BigDecimal finalRefundAmount = netTotalBeforeOverallDiscount.subtract(overallDiscountAmount);
+
+            String returnId = IdGenerator.newId("SRET"); // Use new ID generator
+            SalesReturn salesReturn = SalesReturn.builder()
+                    .salesReturnId(returnId).organizationId(orgId).branchId(branchId)
+                    .originalSaleId(request.getOriginalSaleId()).patientId(originalSale.getPatientId())
+                    //.reason(request.getReason())
+                    .returnDate(Timestamp.of(request.getReturnDate()))
+                    .createdBy(createdByUserId)
+                    .totalReturnedMrp(round(invoiceTotalMrp))
+                    .totalReturnedDiscount(round(invoiceTotalDiscount))
+                    .totalReturnedTaxable(round(invoiceTotalTaxable))
+                    .totalReturnedTax(round(invoiceTotalTax))
+                    .overallDiscountPercentage(request.getOverallDiscountPercentage())
+                    .overallDiscountAmount(round(overallDiscountAmount))
+                    .netRefundAmount(round(finalRefundAmount))
+                    .refundMode(request.getRefundMode())
+                    .refundReference(request.getRefundReference())
+                    .items(returnItems).build();
+
+            salesReturnRepository.saveInTransaction(transaction,orgId,branchId,salesReturn);
+            return salesReturn;
+        }).get();
+    }
+
+    /*public SalesReturn processSalesReturn(String orgId, String branchId, String createdByUserId, CreateSalesReturnRequest request)
             throws ExecutionException, InterruptedException {
 
         return firestore.runTransaction(transaction -> {
@@ -119,7 +233,7 @@ public class ReturnsService {
             BigDecimal overallDiscountAmount = netTotalBeforeOverallDiscount.multiply(overallDiscountPercent);
             BigDecimal finalRefundAmount = netTotalBeforeOverallDiscount.subtract(overallDiscountAmount);
 
-            String returnId = "sret_" + UUID.randomUUID().toString();
+            String returnId = IdGenerator.newId("SRET");
             SalesReturn salesReturn = SalesReturn.builder()
                     .salesReturnId(returnId).organizationId(orgId).branchId(branchId)
                     .originalSaleId(request.getOriginalSaleId()).patientId(originalSale.getPatientId())
@@ -141,7 +255,7 @@ public class ReturnsService {
             return salesReturn;
         }).get();
     }
-
+*/
     /**
      * Processes a purchase return to a supplier. This is a "read-modify-write" operation,
      * so a Transaction is required to ensure data integrity.
@@ -206,7 +320,7 @@ public class ReturnsService {
             // ===================================================================
             // PHASE 3: FINALIZE AND STAGE THE LAST WRITE
             // ===================================================================
-            String returnId = "pret_" + UUID.randomUUID().toString();
+            String returnId = IdGenerator.newId("PRET");
             PurchaseReturn purchaseReturn = PurchaseReturn.builder()
                     .purchaseReturnId(returnId).organizationId(orgId).branchId(branchId)
                     .originalPurchaseId(request.getOriginalPurchaseId()).supplierId(originalPurchase.getSupplierId())
