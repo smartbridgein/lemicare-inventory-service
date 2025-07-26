@@ -7,6 +7,7 @@ import com.cosmicdoc.common.repository.SupplierRepository;
 import com.cosmicdoc.common.repository.TaxProfileRepository;
 import com.cosmicdoc.common.util.IdGenerator;
 import com.cosmicdoc.inventoryservice.dto.request.*;
+import com.cosmicdoc.inventoryservice.dto.response.MedicineStockDetailResponse;
 import com.cosmicdoc.inventoryservice.dto.response.MedicineStockResponse;
 import com.cosmicdoc.inventoryservice.exception.ResourceNotFoundException;
 import com.cosmicdoc.inventoryservice.security.SecurityUtils;
@@ -596,5 +597,42 @@ public class MasterDataService {
 
         // 3. If all checks pass, call the repository to permanently delete the document and its sub-collection.
         medicineRepository.deleteByIdHard(orgId, branchId, medicineId);
+    }
+
+    /**
+     * Fetches the detailed stock view for a single medicine, including
+     * a list of all its available batches.
+     */
+    public MedicineStockDetailResponse getMedicineStockDetails(String orgId, String branchId, String medicineId) {
+        // 1. Fetch the master medicine document.
+        Medicine medicine = medicineRepository.findById(orgId, branchId, medicineId)
+                .orElseThrow(() -> new ResourceNotFoundException("Medicine with ID " + medicineId + " not found."));
+
+        // 2. Fetch all batch documents for this medicine.
+        List<MedicineBatch> batches = medicineBatchRepository.findAllBatchesForMedicine(orgId, branchId, medicineId);
+
+        // 3. Convert the list of batch models to a list of batch DTOs.
+        List<MedicineStockDetailResponse.BatchDetailDto> batchDtos = batches.stream()
+                .map(batch -> MedicineStockDetailResponse.BatchDetailDto.builder()
+                        .batchId(batch.getBatchId())
+                        .batchNo(batch.getBatchNo())
+                        .quantityAvailable(batch.getQuantityAvailable())
+                        .mrp(batch.getMrp())
+                        .expiryDate(batch.getExpiryDate().toDate())
+                        .build())
+                .collect(Collectors.toList());
+
+        // 4. Calculate the total stock from the batches.
+        int totalStock = batchDtos.stream().mapToInt(MedicineStockDetailResponse.BatchDetailDto::getQuantityAvailable).sum();
+
+        // 5. Build the final, rich response DTO.
+        return MedicineStockDetailResponse.builder()
+                .medicineId(medicine.getMedicineId())
+                .name(medicine.getName())
+                .genericName(medicine.getGenericName())
+                .manufacturer(medicine.getManufacturer())
+                .totalStock(totalStock)
+                .batches(batchDtos)
+                .build();
     }
 }

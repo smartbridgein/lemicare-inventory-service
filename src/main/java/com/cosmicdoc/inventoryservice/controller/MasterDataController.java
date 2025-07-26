@@ -5,6 +5,7 @@ import com.cosmicdoc.common.model.Supplier;
 import com.cosmicdoc.common.model.TaxProfile;
 import com.cosmicdoc.common.repository.MedicineRepository;
 import com.cosmicdoc.inventoryservice.dto.request.*;
+import com.cosmicdoc.inventoryservice.dto.response.MedicineStockDetailResponse;
 import com.cosmicdoc.inventoryservice.dto.response.MedicineStockResponse;
 import com.cosmicdoc.inventoryservice.exception.ResourceNotFoundException;
 import com.cosmicdoc.inventoryservice.security.SecurityUtils;
@@ -226,6 +227,24 @@ public class MasterDataController {
             errorResponse.put("success", false);
             errorResponse.put("message", "Failed to cleanup tax profiles: " + e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+
+    /**
+     *  Fetches the detailed stock information for a single medicine,
+     * including a list of all its batches.
+     */
+    @GetMapping("/medicines/{medicineId}/stock-details")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<?> getMedicineStockDetails(@PathVariable String medicineId) {
+        try {
+            String orgId = SecurityUtils.getOrganizationId();
+            String branchId = SecurityUtils.getBranchId();
+
+            MedicineStockDetailResponse stockDetails = masterDataService.getMedicineStockDetails(orgId, branchId, medicineId);
+            return ResponseEntity.ok(stockDetails);
+        } catch (ResourceNotFoundException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(e.getMessage());
         }
     }
 
