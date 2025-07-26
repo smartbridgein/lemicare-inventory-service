@@ -36,10 +36,11 @@ public class MedicineStockResponse {
      * @param totalStock The real-time stock quantity calculated by summing all available batches.
      * @return A populated MedicineStockResponse DTO.
      */
-    public static MedicineStockResponse from(Medicine medicine, int totalStock) {
+    public static MedicineStockResponse from(Medicine medicine) {
         // --- THIS IS THE CORRECTED LOGIC ---
 
         // 1. Determine the stock status based on the calculated totalStock.
+       int totalStock = medicine.getQuantityInStock();
         String currentStatus;
         if (totalStock <= 0) {
             currentStatus = "Out of Stock";

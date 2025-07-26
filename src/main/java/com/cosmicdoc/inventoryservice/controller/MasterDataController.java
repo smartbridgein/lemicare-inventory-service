@@ -193,6 +193,41 @@ public class MasterDataController {
         }
     }
 
+    @Operation(
+            summary = "Clean up Tax Profiles",
+            description = "Deletes all tax profiles except the 'no tax' profile. This is useful for resolving tax profile inconsistencies. Medicines using deleted profiles will be updated to use the 'no tax' profile. Requires ADMIN or SUPER_ADMIN role.",
+            responses = {
+                    @ApiResponse(responseCode = "200", description = "Cleanup completed successfully",
+                            content = @Content(mediaType = "application/json")),
+                    @ApiResponse(responseCode = "401", description = "Unauthorized"),
+                    @ApiResponse(responseCode = "403", description = "Forbidden - User does not have required role")
+            }
+    )
+    @PostMapping("/tax-profiles/cleanup")
+    @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
+    public ResponseEntity<?> cleanupTaxProfiles() {
+        try {
+            String orgId = SecurityUtils.getOrganizationId();
+            MasterDataService.CleanupResult result = masterDataService.cleanupTaxProfiles(orgId);
+            
+            // Create response object
+            java.util.Map<String, Object> response = new java.util.HashMap<>();
+            response.put("success", true);
+            response.put("message", "Tax profile cleanup completed");
+            response.put("deletedCount", result.getDeletedCount());
+            response.put("errorCount", result.getErrorCount());
+            if (result.getErrorCount() > 0) {
+                response.put("errors", result.getErrors());
+            }
+            
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            java.util.Map<String, Object> errorResponse = new java.util.HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", "Failed to cleanup tax profiles: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
 
  }
 

@@ -14,6 +14,8 @@ public class CreatePurchaseRequest {
     @NotBlank(message = "Supplier ID is required.")
     private String supplierId;
 
+    private String supplierName;
+
     @NotNull(message = "Invoice date is required.")
     private Date invoiceDate;
 

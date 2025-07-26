@@ -355,7 +355,9 @@ public class PurchaseService {
             String purchaseId = IdGenerator.newId("PUR");
             Purchase newPurchase = Purchase.builder()
                     .purchaseId(purchaseId).organizationId(orgId).branchId(branchId)
-                    .supplierId(request.getSupplierId()).invoiceDate(Timestamp.of(request.getInvoiceDate()))
+                    .supplierId(request.getSupplierId())
+                    .supplierName(request.getSupplierName())
+                    .invoiceDate(Timestamp.of(request.getInvoiceDate()))
                     .referenceId(request.getReferenceId()).gstType(request.getGstType())
                     .totalTaxableAmount(round(invoiceTotalTaxable[0]))
                     .totalDiscountAmount(round(invoiceTotalDiscount[0]))
@@ -389,6 +391,9 @@ public class PurchaseService {
                             .mrp(item.getMrpPerItem()).build();
                     medicineBatchRepository.saveInTransaction(transaction, orgId, branchId, item.getMedicineId(), newBatch);
                 }
+                medicineRepository.updateStockInTransaction(
+                        transaction, orgId, branchId, item.getMedicineId(), item.getTotalReceivedQuantity()
+                );
             }
 
             return newPurchase;

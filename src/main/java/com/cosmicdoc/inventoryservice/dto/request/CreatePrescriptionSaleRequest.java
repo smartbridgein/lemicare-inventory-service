@@ -1,5 +1,6 @@
 package com.cosmicdoc.inventoryservice.dto.request;
 
+import com.cosmicdoc.common.model.AdjustmentType;
 import com.cosmicdoc.common.model.GstType;
 import com.cosmicdoc.common.model.PaymentMode;
 import jakarta.validation.Valid;
@@ -39,5 +40,8 @@ public class CreatePrescriptionSaleRequest {
     @Valid
     @NotEmpty(message = "A sale must contain at least one item.")
     private List<SaleItemDto> items;
+
+    private AdjustmentType overallAdjustmentType; // Optional
+    private Double overallAdjustmentValue;
 
  }

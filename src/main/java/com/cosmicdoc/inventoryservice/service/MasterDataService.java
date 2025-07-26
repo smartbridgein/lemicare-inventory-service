@@ -75,7 +75,7 @@ public class MasterDataService {
             return medicineRepository.save(orgId, branchId, newMedicine);
         }
 
-    public List<MedicineStockResponse> getMedicinesForBranch(String orgId, String branchId) {
+    /*public List<MedicineStockResponse> getMedicinesForBranch(String orgId, String branchId) {
         // 1. Fetch all the medicine master documents for the branch.
         List<Medicine> medicines = medicineRepository.findAllByBranchId(orgId, branchId);
 
@@ -92,6 +92,21 @@ public class MasterDataService {
 
                     // 3. Create the response DTO with the calculated stock.
                     return MedicineStockResponse.from(medicine, totalStock);
+                })
+                .collect(Collectors.toList());
+    }*/
+
+    public List<MedicineStockResponse> getMedicinesForBranch(String orgId, String branchId) {
+        // --- THE NEW, EFFICIENT LOGIC ---
+
+        // 1. Fetch all the medicine master documents for the branch. This is the ONLY database call.
+        List<Medicine> medicines = medicineRepository.findAllByBranchId(orgId, branchId);
+
+        // 2. The stock is already on the object. Just map to the DTO.
+
+        return medicines.stream()
+                .map(medicine -> {
+                    return MedicineStockResponse.from(medicine);
                 })
                 .collect(Collectors.toList());
     }
@@ -439,6 +454,115 @@ public class MasterDataService {
 
         // 3. If all checks pass, call the repository to permanently delete the document.
         taxProfileRepository.deleteById(orgId, taxProfileId);
+    }
+
+    /**
+     * Cleans up all tax profiles except the "no tax" profile.
+     * This method is useful for resolving tax profile inconsistencies.
+     * 
+     * @param orgId The organization ID from the security context.
+     * @return CleanupResult containing the number of profiles deleted and any errors
+     */
+    public CleanupResult cleanupTaxProfiles(String orgId) {
+        List<TaxProfile> allProfiles = taxProfileRepository.findAllByOrganizationId(orgId);
+        int deletedCount = 0;
+        int errorCount = 0;
+        StringBuilder errors = new StringBuilder();
+        
+        for (TaxProfile profile : allProfiles) {
+            // Skip the "no tax" profile - keep profiles that contain "no" and "tax" in name
+            String profileName = profile.getProfileName().toLowerCase();
+            String profileId = profile.getTaxProfileId().toLowerCase();
+            
+            if (profileName.contains("no") && profileName.contains("tax") || 
+                profileId.contains("no") && profileId.contains("tax") ||
+                profileId.equals("tax_no_tax")) {
+                continue; // Skip deletion of "no tax" profiles
+            }
+            
+            try {
+                // Check if the profile is in use before deleting
+                boolean isInUse = medicineRepository.existsByTaxProfileId(orgId, profile.getTaxProfileId());
+                if (isInUse) {
+                    // Update medicines using this profile to use "no tax" profile
+                    List<Medicine> medicinesUsingProfile = medicineRepository.findAllByBranchId(orgId, "")
+                        .stream()
+                        .filter(m -> profile.getTaxProfileId().equals(m.getTaxProfileId()))
+                        .collect(Collectors.toList());
+                    
+                    // Find or create a "no tax" profile
+                    String noTaxProfileId = findOrCreateNoTaxProfile(orgId);
+                    
+                    // Update medicines to use no tax profile
+                    for (Medicine medicine : medicinesUsingProfile) {
+                        medicine.setTaxProfileId(noTaxProfileId);
+                        medicineRepository.save(orgId, "test-org-123", medicine);
+                    }
+                }
+                
+                // Now delete the profile
+                taxProfileRepository.deleteById(orgId, profile.getTaxProfileId());
+                deletedCount++;
+                
+            } catch (Exception e) {
+                errorCount++;
+                errors.append("Failed to delete profile ").append(profile.getProfileName())
+                      .append(": ").append(e.getMessage()).append("; ");
+            }
+        }
+        
+        return new CleanupResult(deletedCount, errorCount, errors.toString());
+    }
+    
+    /**
+     * Finds an existing "no tax" profile or creates one if it doesn't exist.
+     * 
+     * @param orgId The organization ID
+     * @return The ID of the "no tax" profile
+     */
+    private String findOrCreateNoTaxProfile(String orgId) {
+        List<TaxProfile> allProfiles = taxProfileRepository.findAllByOrganizationId(orgId);
+        
+        // Look for existing "no tax" profile
+        for (TaxProfile profile : allProfiles) {
+            String profileName = profile.getProfileName().toLowerCase();
+            String profileId = profile.getTaxProfileId().toLowerCase();
+            
+            if ((profileName.contains("no") && profileName.contains("tax")) || 
+                profileId.contains("no_tax") || profileId.equals("tax_no_tax")) {
+                return profile.getTaxProfileId();
+            }
+        }
+        
+        // Create a new "no tax" profile if none exists
+        TaxProfile noTaxProfile = TaxProfile.builder()
+                .taxProfileId("tax_no_tax")
+                .profileName("No Tax")
+                .totalRate(0.0)
+                .components(List.of()) // Empty list for no tax components
+                .build();
+                
+        TaxProfile savedProfile = taxProfileRepository.save(orgId, noTaxProfile);
+        return savedProfile.getTaxProfileId();
+    }
+    
+    /**
+     * Result class for cleanup operations
+     */
+    public static class CleanupResult {
+        private final int deletedCount;
+        private final int errorCount;
+        private final String errors;
+        
+        public CleanupResult(int deletedCount, int errorCount, String errors) {
+            this.deletedCount = deletedCount;
+            this.errorCount = errorCount;
+            this.errors = errors;
+        }
+        
+        public int getDeletedCount() { return deletedCount; }
+        public int getErrorCount() { return errorCount; }
+        public String getErrors() { return errors; }
     }
 
     /**

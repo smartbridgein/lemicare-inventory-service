@@ -17,7 +17,9 @@ public class WebConfig implements WebMvcConfigurer {
                     "http://localhost:8080",  // Common development port
                     "http://127.0.0.1:4200", // Using IP address instead of localhost
                     "http://127.0.0.1:8080",  // Using IP address instead of localhost
-                    "https://healthcare-app-1078740886343.us-central1.run.app" // Healthcare app URL
+                    "https://healthcare-app-1078740886343.us-central1.run.app", // Healthcare app URL
+                    "https://healthcare-app-145837205370.asia-south1.run.app", // Healthcare app URL
+                    "https://healthcare-app-191932434541.asia-south1.run.app" // Healthcare app URL
                 )
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
                 .allowedHeaders("*")

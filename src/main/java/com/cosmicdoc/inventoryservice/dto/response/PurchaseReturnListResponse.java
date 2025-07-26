@@ -11,6 +11,7 @@ public class PurchaseReturnListResponse {
     private String purchaseReturnId;
     private String originalPurchaseId;
     private String supplierId; // You would fetch the supplier name in a real UI
+    private String supplierName;
     private Date returnDate;
     private double totalReturnedAmount;
 
@@ -22,6 +23,7 @@ public class PurchaseReturnListResponse {
                 .purchaseReturnId(purchaseReturn.getPurchaseReturnId())
                 .originalPurchaseId(purchaseReturn.getOriginalPurchaseId())
                 .supplierId(purchaseReturn.getSupplierId())
+                //.supplierName(purchaseReturn.)
                 .returnDate(purchaseReturn.getReturnDate().toDate())
                 .totalReturnedAmount(purchaseReturn.getTotalReturnedAmount())
                 .build();

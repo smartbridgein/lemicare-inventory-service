@@ -41,7 +41,10 @@ public class SalesService {
                 .paymentMode(request.getPaymentMode())
                 .transactionReference(request.getTransactionReference())
                 .gstType(request.getGstType())
+                .overallAdjustmentType(request.getOverallAdjustmentType())
+                .overallAdjustmentValue(request.getOverallAdjustmentValue() != null ? request.getOverallAdjustmentValue() : 0.0)
                 .build();
+
         // This call is now valid.
         return processSale(orgId, branchId, partialSale, request.getItems(),request.getGrandTotal());
     }
@@ -58,6 +61,8 @@ public class SalesService {
                 .paymentMode(request.getPaymentMode())
                 .transactionReference(request.getTransactionReference())
                 .gstType(request.getGstType())
+                .overallAdjustmentType(request.getOverallAdjustmentType())
+                .overallAdjustmentValue(request.getOverallAdjustmentValue() != null ? request.getOverallAdjustmentValue() : 0.0)
                  .build();
         // This call is also now valid.
         return processSale(orgId, branchId, partialSale, request.getItems(),request.getGrandTotal());
@@ -352,8 +357,15 @@ public class SalesService {
             // PHASE 3: FINAL VALIDATION & STAGING THE LAST WRITE
             // ===================================================================
 
-            // The grand total is always based on the net after discount, as tax is part of that for inclusive sales.
+            // Calculate grand total based on GST type
             BigDecimal serverCalculatedGrandTotal = serverCalculatedTotalMrp.subtract(serverCalculatedTotalDiscount);
+            
+            // For EXCLUSIVE GST, add the calculated tax amount to the grand total
+            // For INCLUSIVE GST, tax is already included in the MRP, so no addition needed
+            // For NON_GST, no tax to add
+            if (partialSale.getGstType() == GstType.EXCLUSIVE) {
+                serverCalculatedGrandTotal = serverCalculatedGrandTotal.add(serverCalculatedTotalTax);
+            }
 
            /* double epsilon = 0.01;
             if (Math.abs(round(serverCalculatedGrandTotal) - clientGrandTotal) > epsilon) {
@@ -490,8 +502,8 @@ public class SalesService {
                     .orElseThrow(() -> new ResourceNotFoundException("Sale with ID " + saleId + " not found to update."));
 
             // 2. READ master data (Medicines, TaxProfiles) for the NEW request items.
-            List<String> requiredMedicineIds = itemDtos.stream().map(SaleItemDto::getMedicineId).distinct().collect(Collectors.toList());
-            List<DocumentSnapshot> medicineSnapshots = medicineRepository.getAll(transaction, orgId, branchId, requiredMedicineIds);
+            List<String> requiredMedicineIdsForNewSale = itemDtos.stream().map(SaleItemDto::getMedicineId).distinct().collect(Collectors.toList());
+            List<DocumentSnapshot> medicineSnapshots = medicineRepository.getAll(transaction, orgId, branchId, requiredMedicineIdsForNewSale);
             Map<String, Medicine> medicineMasterDataMap = medicineSnapshots.stream().map(doc -> {
                 if (!doc.exists()) throw new ResourceNotFoundException("Medicine with ID " + doc.getId() + " not found.");
                 return doc.toObject(Medicine.class);
@@ -509,24 +521,27 @@ public class SalesService {
                 }
             }
 
-            // ===================================================================
-            // PHASE 2: REVERSE OLD STOCK & READ NEW BATCHES
-            // ===================================================================
+            // 3. READ ALL necessary batch data for both reversal and new deduction.
+            Set<String> allInvolvedMedicineIds = new HashSet<>(requiredMedicineIdsForNewSale);
+            originalSale.getItems().forEach(item -> allInvolvedMedicineIds.add(item.getMedicineId()));
 
-            // A. REVERSE the old stock quantities by iterating through the original sale's batch allocations.
+            Map<String, List<MedicineBatch>> medicineToBatchesMap = new HashMap<>();
+            for (String medicineId : allInvolvedMedicineIds) {
+                List<MedicineBatch> batches = medicineBatchRepository.findAvailableBatches(transaction, orgId, branchId, medicineId);
+                medicineToBatchesMap.put(medicineId, batches);
+            }
+
+            // --- All database reads are now 100% complete. ---
+
+            // ===================================================================
+            // PHASE 2: REVERSE OLD STOCK (Staging Writes)
+            // ===================================================================
             for (SaleItem oldItem : originalSale.getItems()) {
                 if (oldItem.getBatchAllocations() == null) continue;
                 for (BatchAllocation allocation : oldItem.getBatchAllocations()) {
                     // Stage the reversal: INCREMENT the stock back to the specific batch.
                     medicineBatchRepository.updateStockInTransaction(transaction, orgId, branchId, oldItem.getMedicineId(), allocation.getBatchId(), allocation.getQuantityTaken());
                 }
-            }
-
-            // B. READ all available batches for the NEW items. This is the last read operation, so it's safe.
-            Map<String, List<MedicineBatch>> medicineToBatchesMap = new HashMap<>();
-            for (String medicineId : requiredMedicineIds) {
-                List<MedicineBatch> batches = medicineBatchRepository.findAvailableBatches(transaction, orgId, branchId, medicineId);
-                medicineToBatchesMap.put(medicineId, batches);
             }
 
             // ===================================================================
@@ -543,13 +558,14 @@ public class SalesService {
                 String medicineId = itemDto.getMedicineId();
                 Medicine medicine = medicineMasterDataMap.get(medicineId);
                 int quantityToSell = itemDto.getQuantity();
-                List<MedicineBatch> availableBatches = medicineToBatchesMap.get(medicineId);
 
+                List<MedicineBatch> availableBatches = medicineToBatchesMap.get(medicineId);
                 int totalStockAvailable = availableBatches.stream().mapToInt(MedicineBatch::getQuantityAvailable).sum();
                 if (totalStockAvailable < quantityToSell) {
                     throw new InsufficientStockException("Insufficient stock for " + medicine.getName() + ". Required: " + quantityToSell + ", Available: " + totalStockAvailable);
                 }
 
+                // Financial Calculation
                 BigDecimal quantity = new BigDecimal(quantityToSell);
                 BigDecimal mrpPerItem = BigDecimal.valueOf(itemDto.getMrp());
                 BigDecimal discountPercent = BigDecimal.valueOf(itemDto.getDiscountPercentage()).divide(new BigDecimal(100));
@@ -581,18 +597,174 @@ public class SalesService {
                 serverCalculatedTotalTaxable = serverCalculatedTotalTaxable.add(lineItemTaxableAmount);
                 serverCalculatedTotalTax = serverCalculatedTotalTax.add(lineItemTaxAmount);
 
+                // FEFO Stock Deduction and Batch Allocation for the NEW items
                 List<BatchAllocation> newAllocations = new ArrayList<>();
                 int remainingQtyToSell = quantityToSell;
                 for (MedicineBatch batch : availableBatches) {
                     if (remainingQtyToSell <= 0) break;
                     int qtyToTakeFromThisBatch = Math.min(remainingQtyToSell, batch.getQuantityAvailable());
                     medicineBatchRepository.updateStockInTransaction(transaction, orgId, branchId, medicineId, batch.getBatchId(), -qtyToTakeFromThisBatch);
-                    newAllocations.add(BatchAllocation.builder().batchId(batch.getBatchId()).batchNo(batch.getBatchNo()).quantityTaken(qtyToTakeFromThisBatch).build());
+                    newAllocations.add(BatchAllocation.builder().batchId(batch.getBatchId()).batchNo(batch.getBatchNo()).quantityTaken(qtyToTakeFromThisBatch).expiryDate(batch.getExpiryDate()).build());
                     remainingQtyToSell -= qtyToTakeFromThisBatch;
                 }
 
                 newSaleItems.add(SaleItem.builder()
                         .medicineId(medicineId).quantity(quantityToSell).batchAllocations(newAllocations)
+                        .mrpPerItem(mrpPerItem.doubleValue()).discountPercentage(itemDto.getDiscountPercentage())
+                        .lineItemDiscountAmount(round(lineItemDiscountAmount)).lineItemTaxableAmount(round(lineItemTaxableAmount))
+                        .lineItemTotalAmount(round(lineItemNetAfterDiscount)).taxProfileId(taxProfile != null ? taxProfile.getTaxProfileId() : "N/A")
+                        .taxRateApplied(taxProfile != null ? taxProfile.getTotalRate() : 0.0)
+                        .taxAmount(round(lineItemTaxAmount)).build());
+            }
+
+            // ===================================================================
+            // PHASE 4: FINAL VALIDATION & UPDATE
+            // ===================================================================
+            BigDecimal serverCalculatedGrandTotal;
+            if (updatedHeader.getGstType() == GstType.INCLUSIVE) {
+                serverCalculatedGrandTotal = serverCalculatedTotalMrp.subtract(serverCalculatedTotalDiscount);
+            } else {
+                serverCalculatedGrandTotal = serverCalculatedTotalTaxable.add(serverCalculatedTotalTax);
+            }
+
+            double epsilon = 0.01;
+           /* if (Math.abs(round(serverCalculatedGrandTotal) - clientGrandTotal) > epsilon) {
+                throw new InvalidRequestException(String.format("Calculation mismatch. Client total: %.2f, Server calculated: %.2f.", clientGrandTotal, round(serverCalculatedGrandTotal)));
+            }*/
+
+            // Update all fields on the originalSale object
+            originalSale.setSaleDate(updatedHeader.getSaleDate());
+            originalSale.setPaymentMode(updatedHeader.getPaymentMode());
+            originalSale.setTransactionReference(updatedHeader.getTransactionReference());
+            originalSale.setGstType(updatedHeader.getGstType());
+            originalSale.setWalkInCustomerName(updatedHeader.getWalkInCustomerName());
+            originalSale.setWalkInCustomerMobile(updatedHeader.getWalkInCustomerMobile());
+            originalSale.setPatientId(updatedHeader.getPatientId());
+            originalSale.setDoctorId(updatedHeader.getDoctorId());
+            originalSale.setPrescriptionDate(updatedHeader.getPrescriptionDate());
+            originalSale.setItems(newSaleItems);
+            originalSale.setTotalMrpAmount(round(serverCalculatedTotalMrp));
+            originalSale.setTotalDiscountAmount(round(serverCalculatedTotalDiscount));
+            originalSale.setTotalTaxableAmount(round(serverCalculatedTotalTaxable));
+            originalSale.setTotalTaxAmount(round(serverCalculatedTotalTax));
+            originalSale.setGrandTotal(round(serverCalculatedGrandTotal));
+            // You would also update audit fields like 'updatedBy' and 'updatedAt' here
+
+            // Stage the final write to save the updated document
+            saleRepository.saveInTransaction(transaction, originalSale);
+            return originalSale;
+
+        }).get();
+    }
+    private Sale processSaleCreation(String orgId, String branchId, Sale partialSale, List<SaleItemDto> itemDtos, Double clientGrandTotal)
+            throws ExecutionException, InterruptedException {
+
+        return firestore.runTransaction(transaction -> {
+            // ===================================================================
+            // PHASE 1: ALL DATABASE READS AND DATA GATHERING
+            // ===================================================================
+
+            List<String> requiredMedicineIds = itemDtos.stream().map(SaleItemDto::getMedicineId).distinct().collect(Collectors.toList());
+
+            // Batch-read all required Medicine documents.
+            Map<String, Medicine> medicineMasterDataMap = medicineRepository.getAll(transaction, orgId, branchId, requiredMedicineIds)
+                    .stream().map(doc -> doc.toObject(Medicine.class))
+                    .collect(Collectors.toMap(Medicine::getMedicineId, Function.identity()));
+
+            // Batch-read all required Tax Profile documents, but only if the sale is taxable.
+            Map<String, TaxProfile> taxProfileMap = new HashMap<>();
+            if (partialSale.getGstType() != GstType.NON_GST) {
+                List<String> requiredTaxProfileIds = medicineMasterDataMap.values().stream()
+                        .map(Medicine::getTaxProfileId).distinct().collect(Collectors.toList());
+                if (!requiredTaxProfileIds.isEmpty()) {
+                    taxProfileMap.putAll(taxProfileRepository.getAll(transaction, orgId, requiredTaxProfileIds)
+                            .stream().map(doc -> doc.toObject(TaxProfile.class))
+                            .collect(Collectors.toMap(TaxProfile::getTaxProfileId, Function.identity())));
+                }
+            }
+
+            // Batch-read ALL available batches for ALL required medicines.
+            Map<String, List<MedicineBatch>> medicineToBatchesMap = new HashMap<>();
+            for (String medicineId : requiredMedicineIds) {
+                List<MedicineBatch> batches = medicineBatchRepository.findAvailableBatches(transaction, orgId, branchId, medicineId);
+                medicineToBatchesMap.put(medicineId, batches);
+            }
+
+            // --- All database reads are now 100% complete. ---
+
+            // ===================================================================
+            // PHASE 2: IN-MEMORY VALIDATION, CALCULATION, AND PREPARING WRITES
+            // ===================================================================
+
+            List<SaleItem> finalSaleItems = new ArrayList<>();
+            BigDecimal serverCalculatedTotalMrp = BigDecimal.ZERO;
+            BigDecimal serverCalculatedTotalDiscount = BigDecimal.ZERO;
+            BigDecimal serverCalculatedTotalTaxable = BigDecimal.ZERO;
+            BigDecimal serverCalculatedTotalTax = BigDecimal.ZERO;
+
+            for (var itemDto : itemDtos) {
+                String medicineId = itemDto.getMedicineId();
+                Medicine medicine = medicineMasterDataMap.get(medicineId);
+                int quantityToSell = itemDto.getQuantity();
+
+                // Stock Validation
+                List<MedicineBatch> availableBatches = medicineToBatchesMap.get(medicineId);
+                int totalStockAvailable = availableBatches.stream().mapToInt(MedicineBatch::getQuantityAvailable).sum();
+                if (totalStockAvailable < quantityToSell) {
+                    throw new InsufficientStockException("Insufficient stock for " + medicine.getName() + ". Required: " + quantityToSell + ", Available: " + totalStockAvailable);
+                }
+
+                // Financial Calculation
+                BigDecimal quantity = new BigDecimal(quantityToSell);
+                BigDecimal mrpPerItem = BigDecimal.valueOf(itemDto.getMrp());
+                BigDecimal discountPercent = BigDecimal.valueOf(itemDto.getDiscountPercentage()).divide(new BigDecimal(100));
+                BigDecimal lineItemGrossMrp = mrpPerItem.multiply(quantity);
+                BigDecimal lineItemDiscountAmount = lineItemGrossMrp.multiply(discountPercent);
+                BigDecimal lineItemNetAfterDiscount = lineItemGrossMrp.subtract(lineItemDiscountAmount);
+                BigDecimal lineItemTaxableAmount;
+                BigDecimal lineItemTaxAmount;
+                TaxProfile taxProfile = null;
+
+                if (partialSale.getGstType() == GstType.NON_GST) {
+                    lineItemTaxableAmount = lineItemNetAfterDiscount;
+                    lineItemTaxAmount = BigDecimal.ZERO;
+                } else {
+                    taxProfile = taxProfileMap.get(medicine.getTaxProfileId());
+                    if (taxProfile == null) throw new InvalidRequestException("Tax profile for " + medicine.getName() + " is missing for a GST sale.");
+                    BigDecimal taxRate = BigDecimal.valueOf(taxProfile.getTotalRate()).divide(new BigDecimal(100));
+                    if (partialSale.getGstType() == GstType.INCLUSIVE) {
+                        lineItemTaxableAmount = lineItemNetAfterDiscount.divide(BigDecimal.ONE.add(taxRate), 2, RoundingMode.HALF_UP);
+                        lineItemTaxAmount = lineItemNetAfterDiscount.subtract(lineItemTaxableAmount);
+                    } else { // EXCLUSIVE
+                        lineItemTaxableAmount = lineItemNetAfterDiscount;
+                        lineItemTaxAmount = lineItemTaxableAmount.multiply(taxRate);
+                    }
+                }
+
+                // Aggregate totals
+                serverCalculatedTotalMrp = serverCalculatedTotalMrp.add(lineItemGrossMrp);
+                serverCalculatedTotalDiscount = serverCalculatedTotalDiscount.add(lineItemDiscountAmount);
+                serverCalculatedTotalTaxable = serverCalculatedTotalTaxable.add(lineItemTaxableAmount);
+                serverCalculatedTotalTax = serverCalculatedTotalTax.add(lineItemTaxAmount);
+
+                // FEFO Stock Deduction and Batch Allocation
+                List<BatchAllocation> allocations = new ArrayList<>();
+                int remainingQtyToSell = quantityToSell;
+                for (MedicineBatch batch : availableBatches) {
+                    if (remainingQtyToSell <= 0) break;
+                    int qtyToTakeFromThisBatch = Math.min(remainingQtyToSell, batch.getQuantityAvailable());
+                    medicineBatchRepository.updateStockInTransaction(transaction, orgId, branchId, medicineId, batch.getBatchId(), -qtyToTakeFromThisBatch);
+                    allocations.add(BatchAllocation.builder().batchId(batch.getBatchId()).batchNo(batch.getBatchNo()).quantityTaken(qtyToTakeFromThisBatch).expiryDate(batch.getExpiryDate()).build());
+                    remainingQtyToSell -= qtyToTakeFromThisBatch;
+                    //newly added code
+                    medicineRepository.updateStockInTransaction(
+                            transaction, orgId, branchId, medicine.getMedicineId(), -qtyToTakeFromThisBatch
+                    );
+                }
+
+                // Build the rich SaleItem model
+                finalSaleItems.add(SaleItem.builder()
+                        .medicineId(medicineId).quantity(quantityToSell).batchAllocations(allocations)
                         .mrpPerItem(mrpPerItem.doubleValue()).discountPercentage(itemDto.getDiscountPercentage())
                         .lineItemDiscountAmount(round(lineItemDiscountAmount)).lineItemTaxableAmount(round(lineItemTaxableAmount))
                         .lineItemTotalAmount(round(lineItemNetAfterDiscount))
@@ -602,36 +774,51 @@ public class SalesService {
             }
 
             // ===================================================================
-            // PHASE 4: FINAL VALIDATION & UPDATE
+            // PHASE 3: OVERALL ADJUSTMENT, FINAL VALIDATION & STAGING THE LAST WRITE
             // ===================================================================
-            BigDecimal serverCalculatedGrandTotal = serverCalculatedTotalMrp.subtract(serverCalculatedTotalDiscount);
-            /*double epsilon = 0.01;
+
+            BigDecimal subTotal;
+            if (partialSale.getGstType() == GstType.INCLUSIVE) {
+                subTotal = serverCalculatedTotalMrp.subtract(serverCalculatedTotalDiscount);
+            } else {
+                subTotal = serverCalculatedTotalTaxable.add(serverCalculatedTotalTax);
+            }
+
+            BigDecimal calculatedOverallAdjustmentAmount = BigDecimal.ZERO;
+            if (partialSale.getOverallAdjustmentType() != null && partialSale.getOverallAdjustmentValue() > 0) {
+                BigDecimal adjustmentValue = BigDecimal.valueOf(partialSale.getOverallAdjustmentValue());
+                switch (partialSale.getOverallAdjustmentType()) {
+                    case PERCENTAGE_DISCOUNT:
+                        calculatedOverallAdjustmentAmount = subTotal.multiply(adjustmentValue.divide(new BigDecimal(100)));
+                        break;
+                    case FIXED_DISCOUNT:
+                        calculatedOverallAdjustmentAmount = adjustmentValue;
+                        break;
+                    case ADDITIONAL_CHARGE:
+                        calculatedOverallAdjustmentAmount = adjustmentValue.negate();
+                        break;
+                }
+            }
+
+            BigDecimal serverCalculatedGrandTotal = subTotal.subtract(calculatedOverallAdjustmentAmount);
+
+            double epsilon = 0.01;
             if (Math.abs(round(serverCalculatedGrandTotal) - clientGrandTotal) > epsilon) {
-                throw new InvalidRequestException(String.format("Calculation mismatch. Client total: %.2f, Server calculated: %.2f.", clientGrandTotal, round(serverCalculatedGrandTotal)));
-            }*/
+                throw new InvalidRequestException(String.format("Calculation mismatch error. Client total: %.2f, Server calculated total: %.2f.", clientGrandTotal, round(serverCalculatedGrandTotal)));
+            }
 
-            originalSale.setSaleDate(updatedHeader.getSaleDate());
-            originalSale.setPaymentMode(updatedHeader.getPaymentMode());
-            originalSale.setTransactionReference(updatedHeader.getTransactionReference());
-            originalSale.setGstType(updatedHeader.getGstType());
-            originalSale.setWalkInCustomerName(updatedHeader.getWalkInCustomerName());
-            originalSale.setWalkInCustomerMobile(updatedHeader.getWalkInCustomerMobile());
-            originalSale.setPatientId(updatedHeader.getPatientId());
+            String saleId = IdGenerator.newId("sale");
+            partialSale.setSaleId(saleId);
+            partialSale.setTotalMrpAmount(round(serverCalculatedTotalMrp));
+            partialSale.setTotalDiscountAmount(round(serverCalculatedTotalDiscount));
+            partialSale.setTotalTaxableAmount(round(serverCalculatedTotalTaxable));
+            partialSale.setTotalTaxAmount(round(serverCalculatedTotalTax));
+            partialSale.setCalculatedOverallAdjustmentAmount(round(calculatedOverallAdjustmentAmount));
+            partialSale.setGrandTotal(round(serverCalculatedGrandTotal));
+            partialSale.setItems(finalSaleItems);
 
-            originalSale.setDoctorId(updatedHeader.getDoctorId());
-            originalSale.setPrescriptionDate(updatedHeader.getPrescriptionDate());
-            originalSale.setItems(newSaleItems);
-            originalSale.setTotalMrpAmount(round(serverCalculatedTotalMrp));
-            originalSale.setTotalDiscountAmount(round(serverCalculatedTotalDiscount));
-            originalSale.setTotalTaxableAmount(round(serverCalculatedTotalTaxable));
-            originalSale.setTotalTaxAmount(round(serverCalculatedTotalTax));
-            originalSale.setGrandTotal(round(serverCalculatedGrandTotal));
-            // Add audit fields for update if you have them in your Sale model
-            // originalSale.setUpdatedBy(updatedByUserId);
-            // originalSale.setUpdatedAt(Timestamp.now());
-
-            saleRepository.saveInTransaction(transaction, originalSale);
-            return originalSale;
+            saleRepository.saveInTransaction(transaction, partialSale);
+            return partialSale;
 
         }).get();
     }

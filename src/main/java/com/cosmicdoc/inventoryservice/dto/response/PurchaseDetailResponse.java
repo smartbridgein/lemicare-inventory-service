@@ -1,8 +1,6 @@
 package com.cosmicdoc.inventoryservice.dto.response;
 
-import com.cosmicdoc.common.model.GstType;
-import com.cosmicdoc.common.model.Purchase;
-import com.cosmicdoc.common.model.TaxComponent;
+import com.cosmicdoc.common.model.*;
 import lombok.Builder;
 import lombok.Data;
 import java.util.Date;
@@ -20,6 +18,7 @@ public class PurchaseDetailResponse {
     // --- Header Information ---
     private String purchaseId;
     private String supplierId;
+    private String supplierName;
     // TODO: Add supplierName for better UI display (requires fetching Supplier master data)
     private Date invoiceDate;
     private String referenceId;
@@ -37,6 +36,11 @@ public class PurchaseDetailResponse {
     // --- Audit Information ---
     private String createdBy;
     private Date createdAt;
+    private double amountPaid;
+    private double dueAmount;
+    private PaymentStatus paymentStatus;
+    private AdjustmentType overallAdjustmentType;
+    private double overallAdjustmentValue;
 
 
     /**
@@ -82,10 +86,15 @@ public class PurchaseDetailResponse {
                 // Map header fields
                 .purchaseId(purchase.getPurchaseId())
                 .supplierId(purchase.getSupplierId())
+                .supplierName(purchase.getSupplierName())
                 .invoiceDate(purchase.getInvoiceDate().toDate())
                 .referenceId(purchase.getReferenceId())
                 // Map financial summary
                 .gstType(purchase.getGstType())
+                .amountPaid(purchase.getAmountPaid())
+                .dueAmount(purchase.getDueAmount())
+                .paymentStatus(purchase.getPaymentStatus())
+                .overallAdjustmentValue(purchase.getOverallAdjustmentValue())
                 .totalTaxableAmount(purchase.getTotalTaxableAmount())
                 .totalDiscountAmount(purchase.getTotalDiscountAmount())
                 .totalTaxAmount(purchase.getTotalTaxAmount())
