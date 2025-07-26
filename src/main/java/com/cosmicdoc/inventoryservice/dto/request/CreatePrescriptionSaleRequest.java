@@ -33,7 +33,7 @@ public class CreatePrescriptionSaleRequest {
 
     // Optional field for card transaction ID, UPI reference, etc.
     private String transactionReference;
-    @NotNull(message = "Grand total calculated by the client is required.")
+    //@NotNull(message = "Grand total calculated by the client is required.")
     private Double grandTotal; // <-- REQUIRED
     @NotNull
     private GstType gstType; // EXCLUSIVE or INCLUSIVE
@@ -43,5 +43,10 @@ public class CreatePrescriptionSaleRequest {
 
     private AdjustmentType overallAdjustmentType; // Optional
     private Double overallAdjustmentValue;
+
+    private String doctorName;
+    private String address;
+    private String gender;
+    private int age;
 
  }

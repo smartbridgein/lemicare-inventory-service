@@ -35,4 +35,9 @@ public class UpdateOtcSaleRequest {
     @Valid
     @NotEmpty(message = "A sale must contain at least one item.")
     private List<SaleItemDto> items;
+
+    private String doctorName;
+    private String address;
+    private String gender;
+    private int age;
 }

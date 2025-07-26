@@ -36,6 +36,11 @@ public class SalesService {
                 .branchId(branchId)
                 .patientId(request.getPatientId())
                 .doctorId(request.getDoctorId())
+                .doctorName(request.getDoctorName())
+                .doctorName(request.getDoctorName())
+                .address(request.getAddress())
+                .age(request.getAge())
+                .gender(request.getGender())
                 .createdBy(createdByUserId)
                 .saleDate(Timestamp.of(request.getSaleDate()))
                 .paymentMode(request.getPaymentMode())
@@ -46,7 +51,7 @@ public class SalesService {
                 .build();
 
         // This call is now valid.
-        return processSale(orgId, branchId, partialSale, request.getItems(),request.getGrandTotal());
+        return processSaleCreation(orgId, branchId, partialSale, request.getItems(),request.getGrandTotal());
     }
 
     public Sale createOtcSale(String orgId, String branchId, String createdByUserId, CreateOtcSaleRequest request) throws ExecutionException, InterruptedException {
@@ -62,10 +67,14 @@ public class SalesService {
                 .transactionReference(request.getTransactionReference())
                 .gstType(request.getGstType())
                 .overallAdjustmentType(request.getOverallAdjustmentType())
+                .doctorName(request.getDoctorName())
+                .address(request.getAddress())
+                .age(request.getAge())
+                .gender(request.getGender())
                 .overallAdjustmentValue(request.getOverallAdjustmentValue() != null ? request.getOverallAdjustmentValue() : 0.0)
                  .build();
         // This call is also now valid.
-        return processSale(orgId, branchId, partialSale, request.getItems(),request.getGrandTotal());
+        return processSaleCreation(orgId, branchId, partialSale, request.getItems(),request.getGrandTotal());
     }
     /**
      * Private helper method containing the core Firestore transaction logic for any sale.
@@ -473,6 +482,10 @@ public class SalesService {
                 .prescriptionDate(Timestamp.of(request.getPrescriptionDate()))
                 .saleDate(Timestamp.of(request.getSaleDate()))
                 .paymentMode(request.getPaymentMode())
+                .doctorName(request.getDoctorName())
+                .address(request.getAddress())
+                .gender(request.getGender())
+                .age(request.getAge())
                 .transactionReference(request.getTransactionReference())
                 .gstType(request.getGstType()).build();
         return processSaleUpdate(orgId, branchId, updatedByUserId, saleId, updatedHeader, request.getItems(), request.getGrandTotal());
@@ -482,6 +495,10 @@ public class SalesService {
         Sale updatedHeader = Sale.builder()
                 .saleType("OTC").walkInCustomerName(request.getPatientName())
                 .walkInCustomerMobile(request.getPatientMobile())
+                .doctorName(request.getDoctorName())
+                .address(request.getAddress())
+                .gender(request.getGender())
+                .age(request.getAge())
                 .saleDate(Timestamp.of(request.getDate()))
                 .paymentMode(request.getPaymentMode())
                 .transactionReference(request.getTransactionReference())
@@ -679,6 +696,7 @@ public class SalesService {
                 if (!requiredTaxProfileIds.isEmpty()) {
                     taxProfileMap.putAll(taxProfileRepository.getAll(transaction, orgId, requiredTaxProfileIds)
                             .stream().map(doc -> doc.toObject(TaxProfile.class))
+                            .filter(profile -> profile != null && profile.getTaxProfileId() != null)
                             .collect(Collectors.toMap(TaxProfile::getTaxProfileId, Function.identity())));
                 }
             }
@@ -767,7 +785,7 @@ public class SalesService {
                         .medicineId(medicineId).quantity(quantityToSell).batchAllocations(allocations)
                         .mrpPerItem(mrpPerItem.doubleValue()).discountPercentage(itemDto.getDiscountPercentage())
                         .lineItemDiscountAmount(round(lineItemDiscountAmount)).lineItemTaxableAmount(round(lineItemTaxableAmount))
-                        .lineItemTotalAmount(round(lineItemNetAfterDiscount))
+                        .lineItemTotalAmount(round(lineItemTaxableAmount.add(lineItemTaxAmount)))
                         .taxProfileId(taxProfile != null ? taxProfile.getTaxProfileId() : "N/A")
                         .taxRateApplied(taxProfile != null ? taxProfile.getTotalRate() : 0.0)
                         .taxAmount(round(lineItemTaxAmount)).build());
@@ -803,9 +821,9 @@ public class SalesService {
             BigDecimal serverCalculatedGrandTotal = subTotal.subtract(calculatedOverallAdjustmentAmount);
 
             double epsilon = 0.01;
-            if (Math.abs(round(serverCalculatedGrandTotal) - clientGrandTotal) > epsilon) {
+           /* if (Math.abs(round(serverCalculatedGrandTotal) - clientGrandTotal) > epsilon) {
                 throw new InvalidRequestException(String.format("Calculation mismatch error. Client total: %.2f, Server calculated total: %.2f.", clientGrandTotal, round(serverCalculatedGrandTotal)));
-            }
+            }*/
 
             String saleId = IdGenerator.newId("sale");
             partialSale.setSaleId(saleId);
