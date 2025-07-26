@@ -66,11 +66,11 @@ public class SalesService {
                 .paymentMode(request.getPaymentMode())
                 .transactionReference(request.getTransactionReference())
                 .gstType(request.getGstType())
-                .overallAdjustmentType(request.getOverallAdjustmentType())
                 .doctorName(request.getDoctorName())
                 .address(request.getAddress())
                 .age(request.getAge())
                 .gender(request.getGender())
+                .overallAdjustmentType(request.getOverallAdjustmentType())
                 .overallAdjustmentValue(request.getOverallAdjustmentValue() != null ? request.getOverallAdjustmentValue() : 0.0)
                  .build();
         // This call is also now valid.
@@ -487,7 +487,10 @@ public class SalesService {
                 .gender(request.getGender())
                 .age(request.getAge())
                 .transactionReference(request.getTransactionReference())
-                .gstType(request.getGstType()).build();
+                .gstType(request.getGstType())
+                . overallAdjustmentType(request.getOverallAdjustmentType())
+                .overallAdjustmentValue(request.getOverallAdjustmentValue() != null ? request.getOverallAdjustmentValue() : 0.0).build();
+
         return processSaleUpdate(orgId, branchId, updatedByUserId, saleId, updatedHeader, request.getItems(), request.getGrandTotal());
     }
 
@@ -502,6 +505,8 @@ public class SalesService {
                 .saleDate(Timestamp.of(request.getDate()))
                 .paymentMode(request.getPaymentMode())
                 .transactionReference(request.getTransactionReference())
+                . overallAdjustmentType(request.getOverallAdjustmentType())
+                .overallAdjustmentValue(request.getOverallAdjustmentValue() != null ? request.getOverallAdjustmentValue() : 0.0)
                 .gstType(request.getGstType()).build();
         return processSaleUpdate(orgId, branchId, updatedByUserId, saleId, updatedHeader, request.getItems(), request.getGrandTotal());
     }
@@ -634,22 +639,41 @@ public class SalesService {
                         .taxAmount(round(lineItemTaxAmount)).build());
             }
 
-            // ===================================================================
-            // PHASE 4: FINAL VALIDATION & UPDATE
-            // ===================================================================
-            BigDecimal serverCalculatedGrandTotal;
+            BigDecimal subTotal;
             if (updatedHeader.getGstType() == GstType.INCLUSIVE) {
-                serverCalculatedGrandTotal = serverCalculatedTotalMrp.subtract(serverCalculatedTotalDiscount);
-            } else {
-                serverCalculatedGrandTotal = serverCalculatedTotalTaxable.add(serverCalculatedTotalTax);
+                subTotal = serverCalculatedTotalMrp.subtract(serverCalculatedTotalDiscount);
+            } else { // EXCLUSIVE or NON_GST
+                subTotal = serverCalculatedTotalTaxable.add(serverCalculatedTotalTax);
             }
 
-            double epsilon = 0.01;
-           /* if (Math.abs(round(serverCalculatedGrandTotal) - clientGrandTotal) > epsilon) {
+            // B. --- THIS IS THE MISSING LOGIC ---
+            //    Calculate the overall adjustment amount based on the NEW data.
+            BigDecimal calculatedOverallAdjustmentAmount = BigDecimal.ZERO;
+            if (updatedHeader.getOverallAdjustmentType() != null && updatedHeader.getOverallAdjustmentValue() > 0) {
+                BigDecimal adjustmentValue = BigDecimal.valueOf(updatedHeader.getOverallAdjustmentValue());
+                switch (updatedHeader.getOverallAdjustmentType()) {
+                    case PERCENTAGE_DISCOUNT:
+                        calculatedOverallAdjustmentAmount = serverCalculatedTotalTaxable.multiply(adjustmentValue.divide(new BigDecimal(100)));
+                        break;
+                    case FIXED_DISCOUNT:
+                        calculatedOverallAdjustmentAmount = adjustmentValue;
+                        break;
+                    case ADDITIONAL_CHARGE:
+                        calculatedOverallAdjustmentAmount = adjustmentValue.negate();
+                        break;
+                }
+            }
+
+            // C. Calculate the final grand total using the new adjustment.
+            BigDecimal serverCalculatedGrandTotal = subTotal.subtract(calculatedOverallAdjustmentAmount);
+
+            // D. FINAL VALIDATION STEP
+           /* double epsilon = 0.01;
+            if (Math.abs(round(serverCalculatedGrandTotal) - clientGrandTotal) > epsilon) {
                 throw new InvalidRequestException(String.format("Calculation mismatch. Client total: %.2f, Server calculated: %.2f.", clientGrandTotal, round(serverCalculatedGrandTotal)));
             }*/
 
-            // Update all fields on the originalSale object
+            // E. Update all fields on the originalSale object with the new, re-calculated data.
             originalSale.setSaleDate(updatedHeader.getSaleDate());
             originalSale.setPaymentMode(updatedHeader.getPaymentMode());
             originalSale.setTransactionReference(updatedHeader.getTransactionReference());
@@ -660,19 +684,32 @@ public class SalesService {
             originalSale.setDoctorId(updatedHeader.getDoctorId());
             originalSale.setPrescriptionDate(updatedHeader.getPrescriptionDate());
             originalSale.setItems(newSaleItems);
+            originalSale.setDoctorName(updatedHeader.getDoctorName());
+            originalSale.setAddress(updatedHeader.getAddress());
+            originalSale.setAge(updatedHeader.getAge());
+            originalSale.setGender(updatedHeader.getGender());
+
+            // Update all financial fields with new calculated values
             originalSale.setTotalMrpAmount(round(serverCalculatedTotalMrp));
             originalSale.setTotalDiscountAmount(round(serverCalculatedTotalDiscount));
             originalSale.setTotalTaxableAmount(round(serverCalculatedTotalTaxable));
             originalSale.setTotalTaxAmount(round(serverCalculatedTotalTax));
-            originalSale.setGrandTotal(round(serverCalculatedGrandTotal));
-            // You would also update audit fields like 'updatedBy' and 'updatedAt' here
+            originalSale.setOverallAdjustmentType(updatedHeader.getOverallAdjustmentType()); // <-- Store the new adjustment type
+            originalSale.setOverallAdjustmentValue(updatedHeader.getOverallAdjustmentValue()); // <-- Store the new value
+            originalSale.setCalculatedOverallAdjustmentAmount(round(calculatedOverallAdjustmentAmount)); // <-- Store the new calculated amount
+            originalSale.setGrandTotal(round(serverCalculatedGrandTotal)); // <-- Store the final grand total
 
-            // Stage the final write to save the updated document
+            // Add audit fields for update
+            // originalSale.setUpdatedBy(updatedByUserId);
+            // originalSale.setUpdatedAt(Timestamp.now());
+
+            // F. Stage the final write to save the updated document.
             saleRepository.saveInTransaction(transaction, originalSale);
             return originalSale;
-
         }).get();
     }
+
+
     private Sale processSaleCreation(String orgId, String branchId, Sale partialSale, List<SaleItemDto> itemDtos, Double clientGrandTotal)
             throws ExecutionException, InterruptedException {
 

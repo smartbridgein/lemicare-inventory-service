@@ -1,5 +1,6 @@
 package com.cosmicdoc.inventoryservice.dto.request;
 
+import com.cosmicdoc.common.model.AdjustmentType;
 import com.cosmicdoc.common.model.GstType;
 import com.cosmicdoc.common.model.PaymentMode;
 import jakarta.validation.Valid;
@@ -40,4 +41,7 @@ public class UpdateOtcSaleRequest {
     private String address;
     private String gender;
     private int age;
+
+    private AdjustmentType overallAdjustmentType; // Optional
+    private Double overallAdjustmentValue;
 }
