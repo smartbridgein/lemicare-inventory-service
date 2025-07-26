@@ -1,18 +1,18 @@
 package com.cosmicdoc.inventoryservice.service;
 
-import com.cosmicdoc.common.model.Medicine;
-import com.cosmicdoc.common.model.MedicineBatch;
-import com.cosmicdoc.common.model.Sale;
-import com.cosmicdoc.common.repository.MedicineBatchRepository;
-import com.cosmicdoc.common.repository.MedicineRepository;
-import com.cosmicdoc.common.repository.SaleRepository;
+import com.cosmicdoc.common.model.*;
+import com.cosmicdoc.common.repository.*;
 import com.cosmicdoc.inventoryservice.dto.response.DailySalesSummaryResponse;
 import com.cosmicdoc.inventoryservice.dto.response.StockByCategoryResponse;
+import com.cosmicdoc.inventoryservice.dto.response.SupplierLedgerResponse;
+import com.cosmicdoc.inventoryservice.dto.response.TransactionSummaryDto;
+import com.cosmicdoc.inventoryservice.exception.ResourceNotFoundException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -24,6 +24,9 @@ public class ReportingService {
     private final MedicineRepository medicineRepository;
     private final MedicineBatchRepository medicineBatchRepository;
     private final SaleRepository saleRepository;
+    private final SupplierRepository supplierRepository;
+    private final PurchaseRepository purchaseRepository;
+    private final PurchaseReturnRepository purchaseReturnRepository;
 
     /**
      * Generates a stock report grouped by medicine category.
@@ -74,6 +77,65 @@ public class ReportingService {
                 .date(date)
                 .totalSales(totalRevenue)
                 .transactionCount(salesForDay.size())
+                .build();
+    }
+
+    /**
+     * Generates a complete financial ledger for a single supplier.
+     * It fetches the supplier's details, balance, and a history of all
+     * their purchases and returns.
+     */
+    public SupplierLedgerResponse getSupplierLedger(String orgId, String branchId, String supplierId) {
+        // 1. Fetch the Supplier master data.
+        Supplier supplier = supplierRepository.findById(orgId, supplierId)
+                .orElseThrow(() -> new ResourceNotFoundException("Supplier with ID " + supplierId + " not found."));
+
+        // 2. Fetch all Purchase invoices for this supplier in this branch.
+        List<Purchase> purchases = purchaseRepository.findAllBySupplierId(orgId, branchId, supplierId);
+
+        // 3. Fetch all Purchase Return invoices for this supplier in this branch.
+        List<PurchaseReturn> returns = purchaseReturnRepository.findAllBySupplierId(orgId, branchId, supplierId);
+
+        // 4. Map the purchases to our common transaction DTO.
+        List<TransactionSummaryDto> purchaseTransactions = purchases.stream()
+                .map(p -> TransactionSummaryDto.builder()
+                        .transactionId(p.getPurchaseId())
+                        .date(p.getInvoiceDate().toDate())
+                        .type("PURCHASE")
+                        .referenceId(p.getReferenceId())
+                        .invoiceAmount(p.getTotalAmount())
+                        .amountPaid(p.getAmountPaid())
+                        .build())
+                .collect(Collectors.toList());
+
+        // 5. Map the returns to our common transaction DTO.
+        List<TransactionSummaryDto> returnTransactions = returns.stream()
+                .map(r -> TransactionSummaryDto.builder()
+                        .transactionId(r.getPurchaseReturnId())
+                        .date(r.getReturnDate().toDate())
+                        .type("PURCHASE_RETURN")
+                        .referenceId(r.getOriginalPurchaseId()) // Reference the original invoice
+                        .amountCredited(r.getTotalReturnedAmount())
+                        .build())
+                .collect(Collectors.toList());
+
+        // 6. Combine and sort all transactions by date.
+        List<TransactionSummaryDto> allTransactions = new ArrayList<>();
+        allTransactions.addAll(purchaseTransactions);
+        allTransactions.addAll(returnTransactions);
+        allTransactions.sort(Comparator.comparing(TransactionSummaryDto::getDate).reversed()); // Newest first
+
+        // TODO: Implement pagination on this sorted list.
+
+        // 7. Build the final, rich response object.
+        return SupplierLedgerResponse.builder()
+                .supplierId(supplier.getSupplierId())
+                .name(supplier.getName())
+                .contactPerson(supplier.getContactPerson())
+                .email(supplier.getEmail())
+                .mobileNumber(supplier.getMobileNumber())
+                .outstandingBalance(supplier.getOutstandingBalance())
+                .transactions(allTransactions)
                 .build();
     }
 }

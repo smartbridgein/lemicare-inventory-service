@@ -486,6 +486,7 @@ public class SalesService {
                 .address(request.getAddress())
                 .gender(request.getGender())
                 .age(request.getAge())
+                .gstType(request.getGstType())
                 .transactionReference(request.getTransactionReference())
                 .gstType(request.getGstType())
                 . overallAdjustmentType(request.getOverallAdjustmentType())
@@ -563,6 +564,8 @@ public class SalesService {
                 for (BatchAllocation allocation : oldItem.getBatchAllocations()) {
                     // Stage the reversal: INCREMENT the stock back to the specific batch.
                     medicineBatchRepository.updateStockInTransaction(transaction, orgId, branchId, oldItem.getMedicineId(), allocation.getBatchId(), allocation.getQuantityTaken());
+
+                    medicineRepository.updateStockInTransaction(transaction, orgId, branchId, oldItem.getMedicineId(), allocation.getQuantityTaken());
                 }
             }
 
@@ -626,6 +629,8 @@ public class SalesService {
                     if (remainingQtyToSell <= 0) break;
                     int qtyToTakeFromThisBatch = Math.min(remainingQtyToSell, batch.getQuantityAvailable());
                     medicineBatchRepository.updateStockInTransaction(transaction, orgId, branchId, medicineId, batch.getBatchId(), -qtyToTakeFromThisBatch);
+                    medicineRepository.updateStockInTransaction(transaction, orgId, branchId, medicineId, -qtyToTakeFromThisBatch);
+                    
                     newAllocations.add(BatchAllocation.builder().batchId(batch.getBatchId()).batchNo(batch.getBatchNo()).quantityTaken(qtyToTakeFromThisBatch).expiryDate(batch.getExpiryDate()).build());
                     remainingQtyToSell -= qtyToTakeFromThisBatch;
                 }
@@ -688,6 +693,7 @@ public class SalesService {
             originalSale.setAddress(updatedHeader.getAddress());
             originalSale.setAge(updatedHeader.getAge());
             originalSale.setGender(updatedHeader.getGender());
+
 
             // Update all financial fields with new calculated values
             originalSale.setTotalMrpAmount(round(serverCalculatedTotalMrp));

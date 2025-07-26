@@ -486,6 +486,9 @@ public class PurchaseService {
                         throw new IllegalStateException("Cannot edit purchase. Stock from batch " + oldItem.getBatchNo() + " has already been used.");
                     }
                     medicineBatchRepository.updateStockInTransaction(transaction, orgId, branchId, oldItem.getMedicineId(), oldBatch.getBatchId(), -oldItem.getTotalReceivedQuantity());
+                    medicineRepository.updateStockInTransaction(
+                            transaction, orgId, branchId, oldItem.getMedicineId(), -oldItem.getTotalReceivedQuantity()
+                    );
                 }
             }
 
@@ -570,6 +573,9 @@ public class PurchaseService {
                             .purchaseCost(newItem.getPurchaseCostPerPack() / newItem.getItemsPerPack())
                             .mrp(newItem.getMrpPerItem()).build();
                     medicineBatchRepository.saveInTransaction(transaction, orgId, branchId, newItem.getMedicineId(), updatedBatch);
+                    medicineRepository.updateStockInTransaction(
+                            transaction, orgId, branchId, newItem.getMedicineId(), newItem.getTotalReceivedQuantity());
+
                 }
             }
 
