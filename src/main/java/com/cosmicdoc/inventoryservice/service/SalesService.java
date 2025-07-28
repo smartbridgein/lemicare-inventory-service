@@ -534,13 +534,12 @@ public class SalesService {
 
             Map<String, TaxProfile> taxProfileMap = new HashMap<>();
             if (updatedHeader.getGstType() != GstType.NON_GST) {
-                List<String> requiredTaxProfileIds = medicineMasterDataMap.values().stream().map(Medicine::getTaxProfileId).distinct().collect(Collectors.toList());
+                List<String> requiredTaxProfileIds = itemDtos.stream()
+                        .map(SaleItemDto::getTaxProfileId).distinct().collect(Collectors.toList());
                 if (!requiredTaxProfileIds.isEmpty()) {
-                    List<DocumentSnapshot> taxProfileSnapshots = taxProfileRepository.getAll(transaction, orgId, requiredTaxProfileIds);
-                    taxProfileMap.putAll(taxProfileSnapshots.stream().map(doc -> {
-                        if (!doc.exists()) throw new ResourceNotFoundException("TaxProfile with ID " + doc.getId() + " not found.");
-                        return doc.toObject(TaxProfile.class);
-                    }).collect(Collectors.toMap(TaxProfile::getTaxProfileId, Function.identity())));
+                    taxProfileMap.putAll(taxProfileRepository.getAll(transaction, orgId, requiredTaxProfileIds)
+                            .stream().map(doc -> doc.toObject(TaxProfile.class))
+                            .collect(Collectors.toMap(TaxProfile::getTaxProfileId, Function.identity())));
                 }
             }
 
@@ -605,8 +604,11 @@ public class SalesService {
                     lineItemTaxableAmount = lineItemNetAfterDiscount;
                     lineItemTaxAmount = BigDecimal.ZERO;
                 } else {
-                    taxProfile = taxProfileMap.get(medicine.getTaxProfileId());
-                    if (taxProfile == null) throw new InvalidRequestException("Tax profile missing for a GST sale.");
+                    taxProfile = taxProfileMap.get(itemDto.getTaxProfileId());
+                    if (taxProfile == null) {
+                        throw new InvalidRequestException("Tax profile with ID '" + itemDto.getTaxProfileId() + "' not found or is invalid.");
+                    }
+
                     BigDecimal taxRate = BigDecimal.valueOf(taxProfile.getTotalRate()).divide(new BigDecimal(100));
                     if (updatedHeader.getGstType() == GstType.INCLUSIVE) {
                         lineItemTaxableAmount = lineItemNetAfterDiscount.divide(BigDecimal.ONE.add(taxRate), 2, RoundingMode.HALF_UP);
@@ -630,18 +632,27 @@ public class SalesService {
                     int qtyToTakeFromThisBatch = Math.min(remainingQtyToSell, batch.getQuantityAvailable());
                     medicineBatchRepository.updateStockInTransaction(transaction, orgId, branchId, medicineId, batch.getBatchId(), -qtyToTakeFromThisBatch);
                     medicineRepository.updateStockInTransaction(transaction, orgId, branchId, medicineId, -qtyToTakeFromThisBatch);
-                    
+
                     newAllocations.add(BatchAllocation.builder().batchId(batch.getBatchId()).batchNo(batch.getBatchNo()).quantityTaken(qtyToTakeFromThisBatch).expiryDate(batch.getExpiryDate()).build());
                     remainingQtyToSell -= qtyToTakeFromThisBatch;
                 }
 
+                BigDecimal lineItemTotalAmount = lineItemTaxableAmount.add(lineItemTaxAmount);
                 newSaleItems.add(SaleItem.builder()
-                        .medicineId(medicineId).quantity(quantityToSell).batchAllocations(newAllocations)
-                        .mrpPerItem(mrpPerItem.doubleValue()).discountPercentage(itemDto.getDiscountPercentage())
-                        .lineItemDiscountAmount(round(lineItemDiscountAmount)).lineItemTaxableAmount(round(lineItemTaxableAmount))
-                        .lineItemTotalAmount(round(lineItemNetAfterDiscount)).taxProfileId(taxProfile != null ? taxProfile.getTaxProfileId() : "N/A")
+                        .medicineId(medicineId)
+                        .quantity(quantityToSell)
+                        .batchAllocations(newAllocations)
+                        .mrpPerItem(mrpPerItem.doubleValue())
+                        .discountPercentage(itemDto.getDiscountPercentage())
+                        .lineItemDiscountAmount(round(lineItemDiscountAmount))
+                        .lineItemTaxableAmount(round(lineItemTaxableAmount))
+                        // --- THIS IS THE FIX ---
+                        .lineItemTotalAmount(round(lineItemTotalAmount)) // <-- Use the correct final total
+                        // -----------------------
+                        .taxProfileId(taxProfile != null ? taxProfile.getTaxProfileId() : "N/A")
                         .taxRateApplied(taxProfile != null ? taxProfile.getTotalRate() : 0.0)
-                        .taxAmount(round(lineItemTaxAmount)).build());
+                        .taxAmount(round(lineItemTaxAmount))
+                        .build());
             }
 
             BigDecimal subTotal;
@@ -726,20 +737,21 @@ public class SalesService {
 
             List<String> requiredMedicineIds = itemDtos.stream().map(SaleItemDto::getMedicineId).distinct().collect(Collectors.toList());
 
+            List<String> requiredTaxProfileIds = itemDtos.stream()
+                    .map(SaleItemDto::getTaxProfileId).distinct().collect(Collectors.toList());
+
             // Batch-read all required Medicine documents.
             Map<String, Medicine> medicineMasterDataMap = medicineRepository.getAll(transaction, orgId, branchId, requiredMedicineIds)
                     .stream().map(doc -> doc.toObject(Medicine.class))
                     .collect(Collectors.toMap(Medicine::getMedicineId, Function.identity()));
 
             // Batch-read all required Tax Profile documents, but only if the sale is taxable.
+
             Map<String, TaxProfile> taxProfileMap = new HashMap<>();
             if (partialSale.getGstType() != GstType.NON_GST) {
-                List<String> requiredTaxProfileIds = medicineMasterDataMap.values().stream()
-                        .map(Medicine::getTaxProfileId).distinct().collect(Collectors.toList());
                 if (!requiredTaxProfileIds.isEmpty()) {
                     taxProfileMap.putAll(taxProfileRepository.getAll(transaction, orgId, requiredTaxProfileIds)
                             .stream().map(doc -> doc.toObject(TaxProfile.class))
-                            .filter(profile -> profile != null && profile.getTaxProfileId() != null)
                             .collect(Collectors.toMap(TaxProfile::getTaxProfileId, Function.identity())));
                 }
             }
@@ -790,8 +802,11 @@ public class SalesService {
                     lineItemTaxableAmount = lineItemNetAfterDiscount;
                     lineItemTaxAmount = BigDecimal.ZERO;
                 } else {
-                    taxProfile = taxProfileMap.get(medicine.getTaxProfileId());
-                    if (taxProfile == null) throw new InvalidRequestException("Tax profile for " + medicine.getName() + " is missing for a GST sale.");
+                    taxProfile = taxProfileMap.get(itemDto.getTaxProfileId());
+                    if (taxProfile == null) {
+                        throw new InvalidRequestException("Tax profile with ID '" + itemDto.getTaxProfileId() + "' not found or is invalid.");
+                    }
+
                     BigDecimal taxRate = BigDecimal.valueOf(taxProfile.getTotalRate()).divide(new BigDecimal(100));
                     if (partialSale.getGstType() == GstType.INCLUSIVE) {
                         lineItemTaxableAmount = lineItemNetAfterDiscount.divide(BigDecimal.ONE.add(taxRate), 2, RoundingMode.HALF_UP);
@@ -829,7 +844,7 @@ public class SalesService {
                         .mrpPerItem(mrpPerItem.doubleValue()).discountPercentage(itemDto.getDiscountPercentage())
                         .lineItemDiscountAmount(round(lineItemDiscountAmount)).lineItemTaxableAmount(round(lineItemTaxableAmount))
                         .lineItemTotalAmount(round(lineItemTaxableAmount.add(lineItemTaxAmount)))
-                        .taxProfileId(taxProfile != null ? taxProfile.getTaxProfileId() : "N/A")
+                        .taxProfileId(itemDto.getTaxProfileId())
                         .taxRateApplied(taxProfile != null ? taxProfile.getTotalRate() : 0.0)
                         .taxAmount(round(lineItemTaxAmount)).build());
             }

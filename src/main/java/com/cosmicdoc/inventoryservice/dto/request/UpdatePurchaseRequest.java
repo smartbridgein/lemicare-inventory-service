@@ -1,5 +1,6 @@
 package com.cosmicdoc.inventoryservice.dto.request;
 
+import com.cosmicdoc.common.model.AdjustmentType;
 import com.cosmicdoc.common.model.GstType;
 import com.cosmicdoc.common.model.PaymentMode;
 import jakarta.validation.Valid;
@@ -43,6 +44,10 @@ public class UpdatePurchaseRequest {
     @Valid // This is crucial to trigger validation on the nested objects
     @NotEmpty(message = "A purchase must contain at least one item.")
     private List<PurchaseItemDto> items;
+
+    private AdjustmentType overallAdjustmentType; // Optional
+    private Double overallAdjustmentValue; // Optional (e.g., 5 for 5%, or 50 for 50 rupees)
+
 
     /**
      * Nested DTO for each line item in the update request.

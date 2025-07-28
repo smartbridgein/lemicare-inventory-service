@@ -45,6 +45,8 @@ public class CreatePurchaseRequest {
         @NotBlank(message = "Batch number is required.")
         private String batchNo;
 
+        private String medicineName;
+
         @NotNull(message = "Expiry date is required.")
         private Date expiryDate;
 

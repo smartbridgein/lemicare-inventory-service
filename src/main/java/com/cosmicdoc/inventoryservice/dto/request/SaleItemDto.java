@@ -22,5 +22,7 @@ import lombok.Data;
      // The client sends the Unit MRP it used for calculation
         @NotNull @PositiveOrZero
         private Double mrp;
+      @NotBlank(message = "Tax Profile ID is required for each sale item.")
+        private String taxProfileId;
  }
 
