@@ -257,12 +257,22 @@ public class PurchaseService {
                 return doc.toObject(Medicine.class);
             }).collect(Collectors.toMap(Medicine::getMedicineId, Function.identity()));
 
-            List<String> requiredTaxProfileIds = request.getItems().stream().map(CreatePurchaseRequest.PurchaseItemDto::getTaxProfileId).distinct().collect(Collectors.toList());
-            List<DocumentSnapshot> taxProfileSnapshots = taxProfileRepository.getAll(transaction, orgId, requiredTaxProfileIds);
-            Map<String, TaxProfile> taxProfileMap = taxProfileSnapshots.stream().map(doc -> {
-                if (!doc.exists()) throw new ResourceNotFoundException("TaxProfile with ID " + doc.getId() + " not found.");
-                return doc.toObject(TaxProfile.class);
-            }).collect(Collectors.toMap(TaxProfile::getTaxProfileId, Function.identity()));
+
+
+            Map<String, TaxProfile> taxProfileMap = new HashMap<>();
+            if (request.getGstType() != GstType.NON_GST) {
+                List<String> requiredTaxProfileIds = request.getItems().stream()
+                        .map(CreatePurchaseRequest.PurchaseItemDto::getTaxProfileId)
+                        .distinct().collect(Collectors.toList());
+
+                if (!requiredTaxProfileIds.isEmpty()) {
+                    List<DocumentSnapshot> taxProfileSnapshots = taxProfileRepository.getAll(transaction, orgId, requiredTaxProfileIds);
+                    taxProfileMap.putAll(taxProfileSnapshots.stream().map(doc -> {
+                        if (!doc.exists()) throw new ResourceNotFoundException("TaxProfile with ID " + doc.getId() + " not found.");
+                        return doc.toObject(TaxProfile.class);
+                    }).collect(Collectors.toMap(TaxProfile::getTaxProfileId, Function.identity())));
+                }
+            }
 
             // --- All database reads are now complete. ---
 
@@ -275,29 +285,41 @@ public class PurchaseService {
             final BigDecimal[] invoiceTotalTax = {BigDecimal.ZERO};
             final BigDecimal[] invoiceTotalDiscount = {BigDecimal.ZERO};
 
-
             // and populate it completely before building the final Purchase object.
             List<PurchaseItem> purchaseItems = request.getItems().stream().map(itemDto -> {
                 Medicine masterMedicine = medicineMasterDataMap.get(itemDto.getMedicineId());
-                TaxProfile taxProfile = taxProfileMap.get(itemDto.getTaxProfileId());
-                if (taxProfile == null) throw new InvalidRequestException("Tax profile for " + masterMedicine.getName() + " is missing.");
+
 
                 // Financial Calculations
                 BigDecimal packQuantity = new BigDecimal(itemDto.getPackQuantity());
                 BigDecimal costPerPack = BigDecimal.valueOf(itemDto.getPurchaseCostPerPack());
                 BigDecimal discountPercent = BigDecimal.valueOf(itemDto.getDiscountPercentage()).divide(new BigDecimal(100));
-                BigDecimal taxRate = BigDecimal.valueOf(taxProfile.getTotalRate()).divide(new BigDecimal(100));
+               // BigDecimal taxRate = BigDecimal.valueOf(taxProfile.getTotalRate()).divide(new BigDecimal(100));
                 BigDecimal grossAmount = costPerPack.multiply(packQuantity);
                 BigDecimal discountAmount = grossAmount.multiply(discountPercent);
                 BigDecimal netAmountAfterDiscount = grossAmount.subtract(discountAmount);
                 BigDecimal taxableAmount;
                 BigDecimal taxAmount;
-                if (request.getGstType() == GstType.INCLUSIVE) {
-                    taxableAmount = netAmountAfterDiscount.divide(BigDecimal.ONE.add(taxRate), 2, RoundingMode.HALF_UP);
-                    taxAmount = netAmountAfterDiscount.subtract(taxableAmount);
-                } else { // EXCLUSIVE
+
+                TaxProfile taxProfile = null;
+
+                if (request.getGstType() == GstType.NON_GST) {
                     taxableAmount = netAmountAfterDiscount;
-                    taxAmount = taxableAmount.multiply(taxRate);
+                    taxAmount = BigDecimal.ZERO;
+                } else {
+                    taxProfile = taxProfileMap.get(itemDto.getTaxProfileId());
+                    if (taxProfile == null) {
+                        throw new InvalidRequestException("Tax profile ID '" + itemDto.getTaxProfileId() + "' is invalid or missing for a GST item.");
+                    }
+
+                    BigDecimal taxRate = BigDecimal.valueOf(taxProfile.getTotalRate()).divide(new BigDecimal(100));
+                    if (request.getGstType() == GstType.INCLUSIVE) {
+                        taxableAmount = netAmountAfterDiscount.divide(BigDecimal.ONE.add(taxRate), 2, RoundingMode.HALF_UP);
+                        taxAmount = netAmountAfterDiscount.subtract(taxableAmount);
+                    } else { // EXCLUSIVE
+                        taxableAmount = netAmountAfterDiscount;
+                        taxAmount = taxableAmount.multiply(taxRate);
+                    }
                 }
 
                 invoiceTotalTaxable[0] = invoiceTotalTaxable[0].add(taxableAmount);
@@ -316,11 +338,19 @@ public class PurchaseService {
                         .medicineName(masterMedicine.getName())
                         .packQuantity(itemDto.getPackQuantity()).freePackQuantity(itemDto.getFreePackQuantity())
                         .itemsPerPack(itemDto.getItemsPerPack()).totalReceivedQuantity(totalUnitsReceived)
-                        .purchaseCostPerPack(itemDto.getPurchaseCostPerPack()).discountPercentage(itemDto.getDiscountPercentage())
-                        .lineItemDiscountAmount(round(discountAmount)).lineItemTaxableAmount(round(taxableAmount))
-                        .lineItemTaxAmount(round(taxAmount)).lineItemTotalAmount(round(taxableAmount.add(taxAmount)))
-                        .mrpPerItem(itemDto.getMrpPerItem()).taxProfileId(itemDto.getTaxProfileId())
-                        .taxRateApplied(taxProfile.getTotalRate()).taxComponents(taxProfile.getComponents()).build();
+                        .purchaseCostPerPack(itemDto.getPurchaseCostPerPack()).
+                        discountPercentage(itemDto.getDiscountPercentage())
+                        .lineItemDiscountAmount(round(discountAmount)).
+                        lineItemTaxableAmount(round(taxableAmount))
+                        .lineItemTaxAmount(round(taxAmount))
+                        .lineItemTotalAmount(round(taxableAmount.add(taxAmount)))
+                        .mrpPerItem(itemDto.getMrpPerItem())
+                        .taxProfileId(taxProfile != null ? taxProfile.getTaxProfileId() : "N/A")
+                        .taxRateApplied(taxProfile != null ? taxProfile.getTotalRate() : 0.0)
+                        .taxComponents(taxProfile != null ? taxProfile.getComponents() : null)
+                        .build();
+
+
             }).collect(Collectors.toList());
 
             // ===================================================================
@@ -391,7 +421,6 @@ public class PurchaseService {
                     MedicineBatch newBatch = MedicineBatch.builder()
                             .batchId(item.getCreatedBatchId())
                             .batchNo(item.getBatchNo())
-
                             .expiryDate(item.getExpiryDate())
                             .quantityAvailable(item.getTotalReceivedQuantity())
                             .purchaseCost(item.getPurchaseCostPerPack() / item.getItemsPerPack())
@@ -515,7 +544,7 @@ public class PurchaseService {
                 BigDecimal packQuantity = new BigDecimal(itemDto.getPackQuantity());
                 BigDecimal costPerPack = BigDecimal.valueOf(itemDto.getPurchaseCostPerPack());
                 BigDecimal discountPercent = BigDecimal.valueOf(itemDto.getDiscountPercentage()).divide(new BigDecimal(100));
-                BigDecimal taxRate = BigDecimal.valueOf(taxProfile.getTotalRate()).divide(new BigDecimal(100));
+               // BigDecimal taxRate = BigDecimal.valueOf(taxProfile.getTotalRate()).divide(new BigDecimal(100));
 
                 BigDecimal grossAmount = costPerPack.multiply(packQuantity);
                 BigDecimal discountAmount = grossAmount.multiply(discountPercent);
@@ -523,14 +552,25 @@ public class PurchaseService {
 
                 BigDecimal taxableAmount;
                 BigDecimal taxAmount;
-                if (request.getGstType() == GstType.INCLUSIVE) {
-                    taxableAmount = netAmountAfterDiscount.divide(BigDecimal.ONE.add(taxRate), 2, RoundingMode.HALF_UP);
-                    taxAmount = netAmountAfterDiscount.subtract(taxableAmount);
-                } else { // EXCLUSIVE
-                    taxableAmount = netAmountAfterDiscount;
-                    taxAmount = taxableAmount.multiply(taxRate);
-                }
 
+                if (request.getGstType() == GstType.NON_GST) {
+                    taxableAmount = netAmountAfterDiscount;
+                    taxAmount = BigDecimal.ZERO;
+                } else {
+                    taxProfile = taxProfileMap.get(itemDto.getTaxProfileId());
+                    if (taxProfile == null) {
+                        throw new InvalidRequestException("Tax profile ID '" + itemDto.getTaxProfileId() + "' is invalid or missing for a GST item.");
+                    }
+
+                    BigDecimal taxRate = BigDecimal.valueOf(taxProfile.getTotalRate()).divide(new BigDecimal(100));
+                    if (request.getGstType() == GstType.INCLUSIVE) {
+                        taxableAmount = netAmountAfterDiscount.divide(BigDecimal.ONE.add(taxRate), 2, RoundingMode.HALF_UP);
+                        taxAmount = netAmountAfterDiscount.subtract(taxableAmount);
+                    } else { // EXCLUSIVE
+                        taxableAmount = netAmountAfterDiscount;
+                        taxAmount = taxableAmount.multiply(taxRate);
+                    }
+                }
                 newTotalTaxable[0] = newTotalTaxable[0].add(taxableAmount);
                 newTotalTax[0] = newTotalTax[0].add(taxAmount);
                 newTotalDiscount[0] = newTotalDiscount[0].add(discountAmount);
@@ -544,8 +584,10 @@ public class PurchaseService {
                         .purchaseCostPerPack(itemDto.getPurchaseCostPerPack()).discountPercentage(itemDto.getDiscountPercentage())
                         .lineItemDiscountAmount(round(discountAmount)).lineItemTaxableAmount(round(taxableAmount))
                         .lineItemTaxAmount(round(taxAmount)).lineItemTotalAmount(round(taxableAmount.add(taxAmount)))
-                        .mrpPerItem(itemDto.getMrpPerItem()).taxProfileId(itemDto.getTaxProfileId())
-                        .taxRateApplied(taxProfile.getTotalRate()).taxComponents(taxProfile.getComponents()).build();
+                        .mrpPerItem(itemDto.getMrpPerItem())
+                        .taxProfileId(itemDto.getTaxProfileId())
+                        .taxRateApplied(taxProfile.getTotalRate())
+                        .taxComponents(taxProfile.getComponents()).build();
             }).collect(Collectors.toList());
 
             BigDecimal newGrandTotal = newTotalTaxable[0].add(newTotalTax[0]);
@@ -602,7 +644,7 @@ public class PurchaseService {
     }
 
 
-    public Purchase updatePurchase(String orgId, String branchId, String userId, String purchaseId, UpdatePurchaseRequest request)
+    public Purchase updatePurchase2(String orgId, String branchId, String userId, String purchaseId, UpdatePurchaseRequest request)
             throws ExecutionException, InterruptedException {
 
         return firestore.runTransaction(transaction -> {
@@ -647,10 +689,17 @@ public class PurchaseService {
                     .stream().map(doc -> doc.toObject(Medicine.class))
                     .collect(Collectors.toMap(Medicine::getMedicineId, Function.identity()));
 
-            List<String> requiredTaxProfileIds = request.getItems().stream().map(UpdatePurchaseRequest.PurchaseItemDto::getTaxProfileId).distinct().collect(Collectors.toList());
-            Map<String, TaxProfile> taxProfileMap = taxProfileRepository.getAll(transaction, orgId, requiredTaxProfileIds)
-                    .stream().map(doc -> doc.toObject(TaxProfile.class))
-                    .collect(Collectors.toMap(TaxProfile::getTaxProfileId, Function.identity()));
+            Map<String, TaxProfile> taxProfileMap = new HashMap<>();
+            if (request.getGstType() != GstType.NON_GST) {
+                List<String> requiredTaxProfileIds = request.getItems().stream().map(UpdatePurchaseRequest.PurchaseItemDto::getTaxProfileId).distinct().collect(Collectors.toList());
+                if (!requiredTaxProfileIds.isEmpty()) {
+                    List<DocumentSnapshot> taxProfileSnapshots = taxProfileRepository.getAll(transaction, orgId, requiredTaxProfileIds);
+                    taxProfileMap.putAll(taxProfileSnapshots.stream().map(doc -> {
+                        if (!doc.exists()) throw new ResourceNotFoundException("TaxProfile with ID " + doc.getId() + " not found.");
+                        return doc.toObject(TaxProfile.class);
+                    }).collect(Collectors.toMap(TaxProfile::getTaxProfileId, Function.identity())));
+                }
+            }
 
             // ===================================================================
             // PHASE 2: REVERSE OLD TRANSACTION & VALIDATE
@@ -658,7 +707,6 @@ public class PurchaseService {
 
             // A. REVERSE the old inventory and financials
             double oldDueAmount = originalPurchase.getDueAmount();
-
 
             for (PurchaseItem oldItem : originalPurchase.getItems()) {
                 if (oldItem.getCreatedBatchId() != null) {
@@ -685,25 +733,21 @@ public class PurchaseService {
 
             List<PurchaseItem> newPurchaseItems = request.getItems().stream().map(itemDto -> {
                 Medicine masterMedicine = medicineMasterDataMap.get(itemDto.getMedicineId());
-                TaxProfile taxProfile = taxProfileMap.get(itemDto.getTaxProfileId());
-                if (taxProfile == null) throw new InvalidRequestException("Tax profile for " + masterMedicine.getName() + " is missing.");
 
                 BigDecimal packQuantity = new BigDecimal(itemDto.getPackQuantity());
                 BigDecimal costPerPack = BigDecimal.valueOf(itemDto.getPurchaseCostPerPack());
                 BigDecimal discountPercent = BigDecimal.valueOf(itemDto.getDiscountPercentage()).divide(new BigDecimal(100));
-                BigDecimal taxRate = BigDecimal.valueOf(taxProfile.getTotalRate()).divide(new BigDecimal(100));
+               // BigDecimal taxRate = BigDecimal.valueOf(taxProfile.getTotalRate()).divide(new BigDecimal(100));
                 BigDecimal grossAmount = costPerPack.multiply(packQuantity);
                 BigDecimal discountAmount = grossAmount.multiply(discountPercent);
                 BigDecimal netAmountAfterDiscount = grossAmount.subtract(discountAmount);
-                BigDecimal taxableAmount;
-                BigDecimal taxAmount;
-                if (request.getGstType() == GstType.INCLUSIVE) {
-                    taxableAmount = netAmountAfterDiscount.divide(BigDecimal.ONE.add(taxRate), 2, RoundingMode.HALF_UP);
-                    taxAmount = netAmountAfterDiscount.subtract(taxableAmount);
-                } else { // EXCLUSIVE
-                    taxableAmount = netAmountAfterDiscount;
-                    taxAmount = taxableAmount.multiply(taxRate);
-                }
+                BigDecimal taxableAmount = null;
+                BigDecimal taxAmount = null;
+                TaxProfile taxProfile = null;
+
+
+
+
                 newTotalTaxable[0] = newTotalTaxable[0].add(taxableAmount);
                 newTotalTax[0] = newTotalTax[0].add(taxAmount);
                 newTotalDiscount[0] = newTotalDiscount[0].add(discountAmount);
@@ -718,8 +762,12 @@ public class PurchaseService {
                         .purchaseCostPerPack(itemDto.getPurchaseCostPerPack()).discountPercentage(itemDto.getDiscountPercentage())
                         .lineItemDiscountAmount(round(discountAmount)).lineItemTaxableAmount(round(taxableAmount))
                         .lineItemTaxAmount(round(taxAmount)).lineItemTotalAmount(round(taxableAmount.add(taxAmount)))
-                        .mrpPerItem(itemDto.getMrpPerItem()).taxProfileId(itemDto.getTaxProfileId())
-                        .taxRateApplied(taxProfile.getTotalRate()).taxComponents(taxProfile.getComponents()).build();
+                        .mrpPerItem(itemDto.getMrpPerItem())
+                        .taxProfileId(taxProfile != null ? taxProfile.getTaxProfileId() : "N/A")
+                        .taxRateApplied(taxProfile != null ? taxProfile.getTotalRate() : 0.0)
+                        .taxComponents(taxProfile != null ? taxProfile.getComponents() : null)
+                        .build();
+
             }).collect(Collectors.toList());
 
             BigDecimal subTotal = newTotalTaxable[0].add(newTotalTax[0]);
@@ -786,6 +834,193 @@ public class PurchaseService {
                     medicineRepository.updateStockInTransaction(transaction, orgId, branchId, newItem.getMedicineId(), newItem.getTotalReceivedQuantity());
                 }
             }
+
+            return originalPurchase;
+        }).get();
+    }
+
+    public Purchase updatePurchase(String orgId, String branchId, String userId, String purchaseId, UpdatePurchaseRequest request)
+            throws ExecutionException, InterruptedException {
+
+        return firestore.runTransaction(transaction -> {
+            // ===================================================================
+            // PHASE 1: READ ALL ORIGINAL & NEW DATA
+            // ===================================================================
+
+            // 1. Read the original Purchase document.
+            Purchase originalPurchase = purchaseRepository.findById(transaction, orgId, branchId, purchaseId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Purchase with ID " + purchaseId + " not found to update."));
+
+            // 2. Read the new Supplier to get its name for denormalization.
+            Supplier newSupplier = supplierRepository.findById(transaction, orgId, request.getSupplierId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Supplier with ID " + request.getSupplierId() + " not found."));
+
+            // 3. Read master data (Medicines, TaxProfiles) for the NEW request items.
+            List<String> requiredMedicineIds = request.getItems().stream().map(UpdatePurchaseRequest.PurchaseItemDto::getMedicineId).distinct().collect(Collectors.toList());
+            List<DocumentSnapshot> medicineSnapshots = medicineRepository.getAll(transaction, orgId, branchId, requiredMedicineIds);
+            Map<String, Medicine> medicineMasterDataMap = medicineSnapshots.stream().map(doc -> {
+                if (!doc.exists()) throw new ResourceNotFoundException("Medicine with ID " + doc.getId() + " not found.");
+                return doc.toObject(Medicine.class);
+            }).collect(Collectors.toMap(Medicine::getMedicineId, Function.identity()));
+
+            Map<String, TaxProfile> taxProfileMap = new HashMap<>();
+            if (request.getGstType() != GstType.NON_GST) {
+                List<String> requiredTaxProfileIds = request.getItems().stream().map(UpdatePurchaseRequest.PurchaseItemDto::getTaxProfileId).distinct().collect(Collectors.toList());
+                if (!requiredTaxProfileIds.isEmpty()) {
+                    List<DocumentSnapshot> taxProfileSnapshots = taxProfileRepository.getAll(transaction, orgId, requiredTaxProfileIds);
+                    taxProfileMap.putAll(taxProfileSnapshots.stream().map(doc -> {
+                        if (!doc.exists()) throw new ResourceNotFoundException("TaxProfile with ID " + doc.getId() + " not found.");
+                        return doc.toObject(TaxProfile.class);
+                    }).collect(Collectors.toMap(TaxProfile::getTaxProfileId, Function.identity())));
+                }
+            }
+
+            // ===================================================================
+            // PHASE 2: CALCULATE NEW STATE & REVERSE OLD STATE
+            // ===================================================================
+
+            // --- A. Calculate the NEW state of the purchase ---
+            final BigDecimal[] newTotalTaxable = {BigDecimal.ZERO};
+            final BigDecimal[] newTotalTax = {BigDecimal.ZERO};
+            final BigDecimal[] newTotalDiscount = {BigDecimal.ZERO};
+
+            List<PurchaseItem> newPurchaseItems = request.getItems().stream().map(itemDto -> {
+                Medicine masterMedicine = medicineMasterDataMap.get(itemDto.getMedicineId());
+                BigDecimal packQuantity = new BigDecimal(itemDto.getPackQuantity());
+                BigDecimal costPerPack = BigDecimal.valueOf(itemDto.getPurchaseCostPerPack());
+                BigDecimal discountPercent = BigDecimal.valueOf(itemDto.getDiscountPercentage()).divide(new BigDecimal(100));
+                BigDecimal grossAmount = costPerPack.multiply(packQuantity);
+                BigDecimal discountAmount = grossAmount.multiply(discountPercent);
+                BigDecimal netAmountAfterDiscount = grossAmount.subtract(discountAmount);
+                BigDecimal taxableAmount;
+                BigDecimal taxAmount;
+                TaxProfile taxProfile = null;
+
+                if (request.getGstType() == GstType.NON_GST) {
+                    taxableAmount = netAmountAfterDiscount;
+                    taxAmount = BigDecimal.ZERO;
+                } else {
+                    taxProfile = taxProfileMap.get(itemDto.getTaxProfileId());
+                    if (taxProfile == null) throw new InvalidRequestException("Tax profile ID '" + itemDto.getTaxProfileId() + "' is invalid.");
+                    BigDecimal taxRate = BigDecimal.valueOf(taxProfile.getTotalRate()).divide(new BigDecimal(100));
+                    if (request.getGstType() == GstType.INCLUSIVE) {
+                        taxableAmount = netAmountAfterDiscount.divide(BigDecimal.ONE.add(taxRate), 2, RoundingMode.HALF_UP);
+                        taxAmount = netAmountAfterDiscount.subtract(taxableAmount);
+                    } else { // EXCLUSIVE
+                        taxableAmount = netAmountAfterDiscount;
+                        taxAmount = taxableAmount.multiply(taxRate);
+                    }
+                }
+                newTotalTaxable[0] = newTotalTaxable[0].add(taxableAmount);
+                newTotalTax[0] = newTotalTax[0].add(taxAmount);
+                newTotalDiscount[0] = newTotalDiscount[0].add(discountAmount);
+                int totalUnitsReceived = (itemDto.getPackQuantity() + itemDto.getFreePackQuantity()) * itemDto.getItemsPerPack();
+                return PurchaseItem.builder()
+                        .medicineId(itemDto.getMedicineId()).
+                        batchNo(itemDto.getBatchNo()).
+                        createdBatchId(IdGenerator.newId("BAT"))
+                        .expiryDate(Timestamp.of(itemDto.getExpiryDate())).
+                        medicineName(masterMedicine.getName())
+                        .packQuantity(itemDto.getPackQuantity()).
+                        freePackQuantity(itemDto.getFreePackQuantity())
+                        .itemsPerPack(itemDto.getItemsPerPack()).
+                        totalReceivedQuantity(totalUnitsReceived)
+                        .purchaseCostPerPack(itemDto.getPurchaseCostPerPack())
+                        .discountPercentage(itemDto.getDiscountPercentage())
+                        .lineItemDiscountAmount(round(discountAmount))
+                        .lineItemTaxableAmount(round(taxableAmount))
+                        .lineItemTaxAmount(round(taxAmount))
+                        .lineItemTotalAmount(round(taxableAmount.add(taxAmount)))
+                        .mrpPerItem(itemDto.getMrpPerItem()).
+                        taxProfileId(taxProfile != null ? taxProfile.getTaxProfileId() : "N/A")
+                        .taxRateApplied(taxProfile != null ? taxProfile.getTotalRate() : 0.0)
+                        .taxComponents(taxProfile != null ? taxProfile.getComponents() : null)
+                        .build();
+            }).collect(Collectors.toList());
+
+            BigDecimal subTotal = newTotalTaxable[0].add(newTotalTax[0]);
+            BigDecimal calculatedOverallAdjustmentAmount = BigDecimal.ZERO;
+
+            if (request.getOverallAdjustmentType() != null && request.getOverallAdjustmentValue() != null) {
+                BigDecimal adjustmentValue = BigDecimal.valueOf(request.getOverallAdjustmentValue());
+                switch (request.getOverallAdjustmentType()) {
+                    case PERCENTAGE_DISCOUNT: calculatedOverallAdjustmentAmount = newTotalTaxable[0].multiply(adjustmentValue.divide(new BigDecimal(100))); break;
+                    case FIXED_DISCOUNT: calculatedOverallAdjustmentAmount = adjustmentValue; break;
+                    case ADDITIONAL_CHARGE: calculatedOverallAdjustmentAmount = adjustmentValue.negate(); break;
+                }
+            }
+            BigDecimal newGrandTotal = subTotal.subtract(calculatedOverallAdjustmentAmount);
+            double newAmountPaid = request.getAmountPaid();
+            double newDueAmount = round(newGrandTotal) - newAmountPaid;
+            PaymentStatus newPaymentStatus = (newDueAmount <= 0.01) ? PaymentStatus.PAID : (newAmountPaid > 0 ? PaymentStatus.PARTIALLY_PAID : PaymentStatus.PENDING);
+
+
+            // --- B. Calculate the changes needed for inventory and supplier balance ---
+            double oldDueAmount = originalPurchase.getDueAmount();
+            double balanceChange = newDueAmount - oldDueAmount;
+
+            Map<String, Integer> stockChanges = new HashMap<>();
+            newPurchaseItems.forEach(item -> stockChanges.put(item.getMedicineId(), stockChanges.getOrDefault(item.getMedicineId(), 0) + item.getTotalReceivedQuantity()));
+            originalPurchase.getItems().forEach(item -> stockChanges.put(item.getMedicineId(), stockChanges.getOrDefault(item.getMedicineId(), 0) - item.getTotalReceivedQuantity()));
+
+            // ===================================================================
+            // PHASE 3: VALIDATE & STAGE ALL WRITES
+            // ===================================================================
+
+            // 1. STAGE DELETE/VALIDATE: Delete all old batches associated with the original purchase.
+            for (PurchaseItem oldItem : originalPurchase.getItems()) {
+                medicineBatchRepository.findByBatchNo(transaction, orgId, branchId, oldItem.getMedicineId(), oldItem.getBatchNo())
+                        .ifPresent(oldBatch -> {
+                            if (oldBatch.getQuantityAvailable() < oldItem.getTotalReceivedQuantity()) {
+                                throw new IllegalStateException("Cannot edit purchase. Stock from batch " + oldItem.getBatchNo() + " has already been used.");
+                            }
+                            medicineBatchRepository.deleteByIdInTransaction(transaction, orgId, branchId, oldItem.getMedicineId(), oldBatch.getBatchId());
+                        });
+            }
+
+            // 2. STAGE CREATE: Create all the new batches for the updated purchase.
+            for (PurchaseItem newItem : newPurchaseItems) {
+                if (newItem.getTotalReceivedQuantity() > 0) {
+                    MedicineBatch newBatch = MedicineBatch.builder()
+                            .batchId(newItem.getCreatedBatchId()).batchNo(newItem.getBatchNo())
+                            .sourcePurchaseId(purchaseId).expiryDate(newItem.getExpiryDate())
+                            .quantityAvailable(newItem.getTotalReceivedQuantity())
+                            .purchaseCost(newItem.getPurchaseCostPerPack() / newItem.getItemsPerPack())
+                            .mrp(newItem.getMrpPerItem()).build();
+                    medicineBatchRepository.saveInTransaction(transaction, orgId, branchId, newItem.getMedicineId(), newBatch);
+                }
+            }
+
+            // 3. STAGE UPDATE: Update the denormalized stock totals on the parent Medicine documents.
+            for (Map.Entry<String, Integer> entry : stockChanges.entrySet()) {
+                medicineRepository.updateStockInTransaction(transaction, orgId, branchId, entry.getKey(), entry.getValue());
+            }
+
+            // 4. STAGE UPDATE: Atomically adjust the supplier's balance.
+            supplierRepository.updateBalanceInTransaction(transaction, orgId, request.getSupplierId(), balanceChange);
+
+            // (A full implementation would also reverse/re-apply payments).
+
+            // 5. UPDATE the original Purchase object in memory with the new data.
+            originalPurchase.setSupplierId(request.getSupplierId());
+            originalPurchase.setSupplierName(newSupplier.getName());
+            originalPurchase.setInvoiceDate(Timestamp.of(request.getInvoiceDate()));
+            originalPurchase.setReferenceId(request.getReferenceId());
+            originalPurchase.setGstType(request.getGstType());
+            originalPurchase.setItems(newPurchaseItems);
+            originalPurchase.setTotalTaxableAmount(round(newTotalTaxable[0]));
+            originalPurchase.setTotalDiscountAmount(round(newTotalDiscount[0]));
+            originalPurchase.setTotalTaxAmount(round(newTotalTax[0]));
+            originalPurchase.setCalculatedOverallAdjustmentAmount(round(calculatedOverallAdjustmentAmount));
+            originalPurchase.setTotalAmount(round(newGrandTotal));
+            originalPurchase.setOverallAdjustmentType(request.getOverallAdjustmentType());
+            originalPurchase.setAmountPaid(newAmountPaid);
+            originalPurchase.setDueAmount(newDueAmount);
+            originalPurchase.setPaymentStatus(newPaymentStatus);
+
+
+            // 6. STAGE WRITE: Save the final, updated Purchase document.
+            purchaseRepository.saveInTransaction(transaction, originalPurchase);
 
             return originalPurchase;
         }).get();
