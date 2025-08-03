@@ -534,8 +534,8 @@ public class SalesService {
 
             Map<String, TaxProfile> taxProfileMap = new HashMap<>();
             if (updatedHeader.getGstType() != GstType.NON_GST) {
-                List<String> requiredTaxProfileIds = itemDtos.stream()
-                        .map(SaleItemDto::getTaxProfileId).distinct().collect(Collectors.toList());
+                List<String> requiredTaxProfileIds = medicineMasterDataMap.values().stream()
+                        .map(Medicine::getTaxProfileId).distinct().collect(Collectors.toList());
                 if (!requiredTaxProfileIds.isEmpty()) {
                     taxProfileMap.putAll(taxProfileRepository.getAll(transaction, orgId, requiredTaxProfileIds)
                             .stream().map(doc -> doc.toObject(TaxProfile.class))
@@ -543,16 +543,23 @@ public class SalesService {
                 }
             }
 
+
             // 3. READ ALL necessary batch data for both reversal and new deduction.
+
             Set<String> allInvolvedMedicineIds = new HashSet<>(requiredMedicineIdsForNewSale);
             originalSale.getItems().forEach(item -> allInvolvedMedicineIds.add(item.getMedicineId()));
 
-            Map<String, List<MedicineBatch>> medicineToBatchesMap = new HashMap<>();
-            for (String medicineId : allInvolvedMedicineIds) {
-                List<MedicineBatch> batches = medicineBatchRepository.findAvailableBatches(transaction, orgId, branchId, medicineId);
-                medicineToBatchesMap.put(medicineId, batches);
-            }
-
+            Map<String, List<MedicineBatch>> medicineToBatchesMap = allInvolvedMedicineIds.stream()
+                    .collect(Collectors.toMap(
+                            Function.identity(),
+                            medicineId -> {
+                                try {
+                                    return medicineBatchRepository.findAvailableBatches(transaction, orgId, branchId, medicineId);
+                                } catch (ExecutionException | InterruptedException e) {
+                                    throw new RuntimeException(e); // Transactions handle runtime exceptions
+                                }
+                            }
+                    ));
             // --- All database reads are now 100% complete. ---
 
             // ===================================================================
@@ -567,6 +574,7 @@ public class SalesService {
                     medicineRepository.updateStockInTransaction(transaction, orgId, branchId, oldItem.getMedicineId(), allocation.getQuantityTaken());
                 }
             }
+
 
             // ===================================================================
             // PHASE 3: RE-APPLY NEW LOGIC (CALCULATIONS & NEW WRITES)
@@ -646,9 +654,7 @@ public class SalesService {
                         .discountPercentage(itemDto.getDiscountPercentage())
                         .lineItemDiscountAmount(round(lineItemDiscountAmount))
                         .lineItemTaxableAmount(round(lineItemTaxableAmount))
-                        // --- THIS IS THE FIX ---
                         .lineItemTotalAmount(round(lineItemTotalAmount)) // <-- Use the correct final total
-                        // -----------------------
                         .taxProfileId(taxProfile != null ? taxProfile.getTaxProfileId() : "N/A")
                         .taxRateApplied(taxProfile != null ? taxProfile.getTotalRate() : 0.0)
                         .taxAmount(round(lineItemTaxAmount))
@@ -662,7 +668,6 @@ public class SalesService {
                 subTotal = serverCalculatedTotalTaxable.add(serverCalculatedTotalTax);
             }
 
-            // B. --- THIS IS THE MISSING LOGIC ---
             //    Calculate the overall adjustment amount based on the NEW data.
             BigDecimal calculatedOverallAdjustmentAmount = BigDecimal.ZERO;
             if (updatedHeader.getOverallAdjustmentType() != null && updatedHeader.getOverallAdjustmentValue() > 0) {
