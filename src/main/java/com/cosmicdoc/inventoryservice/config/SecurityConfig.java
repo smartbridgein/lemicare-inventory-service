@@ -24,8 +24,7 @@ import java.util.Collection;
 
 @Configuration
 @EnableWebSecurity
-// Disabling @EnableMethodSecurity for testing purposes
-// @EnableMethodSecurity // Enables @PreAuthorize
+@EnableMethodSecurity
 public class SecurityConfig {
 
     @Value("${spring.security.oauth2.resourceserver.jwt.secret-key}")

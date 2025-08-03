@@ -20,12 +20,13 @@ import java.util.concurrent.ExecutionException;
 @RestController
 @RequestMapping("/api/inventory/purchases")
 @RequiredArgsConstructor
-@PreAuthorize("hasAnyRole('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')") // Securing the whole controller
+
 public class PurchaseController {
 
     private final PurchaseService purchaseService;
 
     @PostMapping("/")
+    @PreAuthorize("hasAnyRole('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
     public ResponseEntity<?> createPurchase(@Valid @RequestBody CreatePurchaseRequest request) {
         try {
             String orgId = SecurityUtils.getOrganizationId();
@@ -45,6 +46,7 @@ public class PurchaseController {
     }
 
     @GetMapping("/")
+    @PreAuthorize("hasAnyRole('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
     public ResponseEntity<List<Purchase>> listPurchases() {
         String orgId = SecurityUtils.getOrganizationId();
         String branchId = SecurityUtils.getBranchId();
@@ -53,6 +55,7 @@ public class PurchaseController {
     }
 
     @GetMapping("/{purchaseId}")
+    @PreAuthorize("hasAnyRole('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
     public ResponseEntity<?> getPurchaseDetails(@PathVariable String purchaseId) {
         try {
             String orgId = SecurityUtils.getOrganizationId();
@@ -65,7 +68,7 @@ public class PurchaseController {
     }
 
     @PutMapping("/{purchaseId}")
-    @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
+    @PreAuthorize("hasAnyAuthority('ROLE_SUPER_ADMIN')")
     public ResponseEntity<?> updatePurchase(
             @PathVariable String purchaseId,
             @Valid @RequestBody UpdatePurchaseRequest request) { // Use an Update DTO

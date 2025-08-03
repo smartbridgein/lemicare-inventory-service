@@ -19,7 +19,7 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/inventory/reports")
 @RequiredArgsConstructor
-@PreAuthorize("hasAnyRole('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
+@PreAuthorize("hasAnyRole('ROLE_SUPER_ADMIN')")
 public class ReportsController {
 
     private final ReportingService reportingService;
