@@ -23,8 +23,8 @@ import java.util.Base64;
 import java.util.Collection;
 
 @Configuration
-@EnableWebSecurity
-@EnableMethodSecurity
+//@EnableWebSecurity
+//@EnableMethodSecurity
 public class SecurityConfig {
 
     @Value("${spring.security.oauth2.resourceserver.jwt.secret-key}")
@@ -44,15 +44,15 @@ public class SecurityConfig {
 
         return http.build();
     }
-    
+
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
         configuration.setAllowedOrigins(Arrays.asList(
-            "http://localhost:4200", 
-            "http://127.0.0.1:4200",
-            "https://healthcare-app-1078740886343.us-central1.run.app",
-            "https://healthcare-app-145837205370.asia-south1.run.app"
+                "http://localhost:4200",
+                "http://127.0.0.1:4200",
+                "https://healthcare-app-1078740886343.us-central1.run.app",
+                "https://healthcare-app-145837205370.asia-south1.run.app"
         ));
 
         configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS"));

@@ -22,12 +22,13 @@ import java.util.concurrent.ExecutionException;
 @RestController
 @RequestMapping("/api/inventory/sales")
 @RequiredArgsConstructor
-@PreAuthorize("isAuthenticated()") // All sales operations require an authenticated user
+@PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
 public class SalesController {
 
     private final SalesService salesService;
 
     @PostMapping("/prescription")
+    @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
     public ResponseEntity<?> createPrescriptionSale(@Valid @RequestBody CreatePrescriptionSaleRequest request) {
         try {
             String orgId = SecurityUtils.getOrganizationId();
@@ -43,6 +44,7 @@ public class SalesController {
     }
 
     @PostMapping("/otc")
+    @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
     public ResponseEntity<?> createOtcSale(@Valid @RequestBody CreateOtcSaleRequest request) throws ExecutionException, InterruptedException {
         //try {
             String orgId = SecurityUtils.getOrganizationId();
@@ -58,6 +60,7 @@ public class SalesController {
     }
 
     @GetMapping("/")
+    @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
     public ResponseEntity<List<Sale>> listSales() {
         String orgId = SecurityUtils.getOrganizationId();
         String branchId = SecurityUtils.getBranchId();
@@ -108,7 +111,7 @@ public class SalesController {
      * @return A ResponseEntity with the updated Sale object or an error.
      */
     @PutMapping("/otc/{saleId}")
-    @PreAuthorize("isAuthenticated()") // Or a more restrictive role if needed
+    @PreAuthorize("hasAuthority('ROLE_SUPER_ADMIN')")
     public ResponseEntity<?> updateOtcSale(
             @PathVariable String saleId,
             @Valid @RequestBody UpdateOtcSaleRequest request) {
@@ -134,7 +137,7 @@ public class SalesController {
     }
 
     @PutMapping("/prescription/{saleId}")
-    @PreAuthorize("isAuthenticated()") // Or a more restrictive role if needed
+    @PreAuthorize("hasAuthority('ROLE_SUPER_ADMIN')")
     public ResponseEntity<?> updatePrescriptionSale(
             @PathVariable String saleId,
             @Valid @RequestBody UpdatePrescriptionSaleRequest request) {

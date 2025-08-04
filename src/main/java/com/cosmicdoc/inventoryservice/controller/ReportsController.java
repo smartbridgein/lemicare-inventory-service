@@ -25,6 +25,7 @@ public class ReportsController {
     private final ReportingService reportingService;
 
     @GetMapping("/stock-by-category")
+    @PreAuthorize("hasAnyRole('ROLE_SUPER_ADMIN')")
     public ResponseEntity<List<StockByCategoryResponse>> getStockByCategory() {
         String orgId = SecurityUtils.getOrganizationId();
         String branchId = SecurityUtils.getBranchId();
@@ -33,6 +34,7 @@ public class ReportsController {
     }
 
     @GetMapping("/daily-sales")
+    @PreAuthorize("hasAnyRole('ROLE_SUPER_ADMIN')")
     public ResponseEntity<DailySalesSummaryResponse> getDailySales(
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
         String orgId = SecurityUtils.getOrganizationId();
@@ -42,6 +44,7 @@ public class ReportsController {
     }
 
     @GetMapping("/{supplierId}")
+    @PreAuthorize("hasAnyRole('ROLE_SUPER_ADMIN')")
     public ResponseEntity<?> getSupplierLedgerDetails(@PathVariable String supplierId) {
         try {
             String orgId = SecurityUtils.getOrganizationId();

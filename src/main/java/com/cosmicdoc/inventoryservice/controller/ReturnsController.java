@@ -26,7 +26,7 @@ import java.util.concurrent.ExecutionException;
 @RestController
 @RequestMapping("/api/inventory/returns")
 @RequiredArgsConstructor
-@PreAuthorize("isAuthenticated()") // All return operations require authentication
+@PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')") // All return operations require authentication
 public class ReturnsController {
 
     private final ReturnsService returnsService;
@@ -35,6 +35,7 @@ public class ReturnsController {
      * Get all returns (both sales and purchase returns)
      */
     @GetMapping
+    @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
     public ResponseEntity<List<?>> getAllReturns() {
         try {
             String orgId = SecurityUtils.getOrganizationId();
@@ -52,6 +53,7 @@ public class ReturnsController {
      * Get all sales returns
      */
     @GetMapping("/sales")
+    @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
     public ResponseEntity<List<SalesReturnListResponse>> getSalesReturns() {
         String orgId = SecurityUtils.getOrganizationId();
         String branchId = SecurityUtils.getBranchId();
@@ -66,6 +68,7 @@ public class ReturnsController {
      * Get all purchase returns
      */
     @GetMapping("/purchases")
+    @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
     public ResponseEntity<List<PurchaseReturnListResponse>> getPurchaseReturns() {
         String orgId = SecurityUtils.getOrganizationId();
         String branchId = SecurityUtils.getBranchId();
@@ -81,6 +84,7 @@ public class ReturnsController {
      * This action increases stock levels.
      */
     @PostMapping("/sale")
+    @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
     public ResponseEntity<?> createSalesReturn(@Valid @RequestBody CreateSalesReturnRequest request) {
         try {
             String orgId = SecurityUtils.getOrganizationId();
@@ -100,7 +104,7 @@ public class ReturnsController {
      * This action decreases stock levels.
      */
     @PostMapping("/purchase")
-    @PreAuthorize("hasAnyRole('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')") // Only admins can return to supplier
+    @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')") // Only admins can return to supplier
     public ResponseEntity<?> createPurchaseReturn(@Valid @RequestBody CreatePurchaseReturnRequest request) {
         try {
             String orgId = SecurityUtils.getOrganizationId();

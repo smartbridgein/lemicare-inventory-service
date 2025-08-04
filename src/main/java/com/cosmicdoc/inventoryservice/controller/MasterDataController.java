@@ -31,6 +31,7 @@ import java.util.List;
 @Tag(name = "Master Data Management", description = "APIs for managing master records like Suppliers, Medicines, and Tax Profiles")
 // This annotation applies the lock icon to all endpoints in this controller
 @SecurityRequirement(name = "bearerAuth")
+@PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
 public class MasterDataController {
 
     private final MasterDataService masterDataService;
@@ -59,7 +60,7 @@ public class MasterDataController {
     }
 
     @GetMapping("/suppliers")
-    @PreAuthorize("isAuthenticated()")
+    @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
     public ResponseEntity<List<Supplier>> listSuppliers() {
         String orgId = SecurityUtils.getOrganizationId();
         List<Supplier> suppliers = masterDataService.getSuppliersForOrg(orgId);
@@ -91,7 +92,7 @@ public class MasterDataController {
     // --- Tax Profile Endpoints (Organization-Specific) ---
 
     @GetMapping("/tax-profiles")
-    @PreAuthorize("isAuthenticated()")
+    @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
     public ResponseEntity<List<TaxProfile>> listTaxProfiles() {
         String orgId = SecurityUtils.getOrganizationId();
         List<TaxProfile> taxProfiles = masterDataService.getTaxProfilesForOrg(orgId);
@@ -119,7 +120,7 @@ public class MasterDataController {
     }
 
     @GetMapping("/medicines")
-    @PreAuthorize("isAuthenticated()")
+    @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
     public ResponseEntity<List<MedicineStockResponse>> listMedicines() {
         String orgId = SecurityUtils.getOrganizationId();
         String branchId = SecurityUtils.getBranchId();
@@ -129,7 +130,7 @@ public class MasterDataController {
     }
 
     @GetMapping("/medicines/{medicineId}")
-    @PreAuthorize("isAuthenticated()")
+    @PreAuthorize("hasAnyAuthority('ROLE_ADMIN', 'ROLE_SUPER_ADMIN')")
     public ResponseEntity<Medicine> getMedicineById(@PathVariable String medicineId) {
 
             String orgId = SecurityUtils.getOrganizationId();
@@ -235,7 +236,7 @@ public class MasterDataController {
      * including a list of all its batches.
      */
     @GetMapping("/medicines/{medicineId}/stock-details")
-    @PreAuthorize("isAuthenticated()")
+    @PreAuthorize("hasAnyAuthority('ROLE_SUPER_ADMIN')")
     public ResponseEntity<?> getMedicineStockDetails(@PathVariable String medicineId) {
         try {
             String orgId = SecurityUtils.getOrganizationId();
