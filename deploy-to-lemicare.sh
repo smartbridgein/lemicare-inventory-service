@@ -9,7 +9,7 @@ SERVICE_NAME="inventory-service"
 IMAGE="gcr.io/${PROJECT_ID}/${SERVICE_NAME}:latest"
 
 echo "=== Building and installing cosmicdoc-common library ===" 
-COMMON_LIB_PATH="../cosmicdoc-common"
+COMMON_LIB_PATH="../lemicare-common"
 
 # Check if common library exists
 if [ ! -d "$COMMON_LIB_PATH" ]; then

@@ -36,6 +36,7 @@ public class ReturnsService {
     private final MedicineRepository medicineRepository; // Needed for validation
     private final SaleRepository saleRepository;
     private final PurchaseRepository purchaseRepository;
+    private final SupplierRepository supplierRepository;
     /**
      * Processes a sales return from a patient. This operation is transactional to
      * validate the original sale and medicine, and to atomically create new batches
@@ -272,6 +273,8 @@ public class ReturnsService {
             Purchase originalPurchase = purchaseRepository.findById(transaction, orgId, branchId, request.getOriginalPurchaseId())
                     .orElseThrow(() -> new ResourceNotFoundException("Original purchase with ID " + request.getOriginalPurchaseId() + " not found."));
 
+            Supplier supplier = supplierRepository.findById(transaction, orgId, originalPurchase.getSupplierId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Supplier with ID " + originalPurchase.getSupplierId() + " not found."));
             List<PurchaseReturnItem> returnItems = new ArrayList<>();
             BigDecimal totalReturnValue = BigDecimal.ZERO;
 
@@ -324,6 +327,7 @@ public class ReturnsService {
             PurchaseReturn purchaseReturn = PurchaseReturn.builder()
                     .purchaseReturnId(returnId).organizationId(orgId).branchId(branchId)
                     .originalPurchaseId(request.getOriginalPurchaseId()).supplierId(originalPurchase.getSupplierId())
+                    .supplierName(supplier.getName())
                     .reason(request.getReason()).returnDate(Timestamp.of(request.getReturnDate()))
                     .createdBy(createdByUserId)
                     .totalReturnedAmount(round(totalReturnValue))

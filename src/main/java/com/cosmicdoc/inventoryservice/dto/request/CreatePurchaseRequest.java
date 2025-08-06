@@ -74,7 +74,7 @@ public class CreatePurchaseRequest {
         @PositiveOrZero
         private Double mrpPerItem;
 
-        @NotBlank(message = "Tax Profile ID is required for each item.")
+       // @NotBlank(message = "Tax Profile ID is required for each item.")
         private String taxProfileId;
 
         @Min(0)
